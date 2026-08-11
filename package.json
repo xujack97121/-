@@ -1,0 +1,84 @@
+{
+  "name": "xiaohongshu-multi-account-collector",
+  "version": "2.0.1",
+  "description": "支持多账号隔离登录的小红书公开数据采集与笔记操作工作台",
+  "author": "xujack",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "desktop": "npm run build && electron .",
+    "desktop:check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/account-registry.cjs && node --check electron/app-icon.cjs && node --check electron/normalizer.cjs && node --check electron/comment-dom-capture.cjs",
+    "package:mac": "npm run check && electron-builder --mac dmg --universal",
+    "check": "npm run build && npm run desktop:check && npm test",
+    "test": "node tests/service-worker.test.mjs && node tests/desktop-normalizer.test.cjs && node tests/account-registry.test.cjs && node tests/preload-account-routing.test.cjs && node tests/app-icon.test.cjs && node tests/comment-randomizer.test.mjs && node tests/comment-time-filter.test.mjs && node tests/note-time-filter.test.mjs && node tests/operation-interval.test.mjs && node tests/operation-status.test.mjs"
+  },
+  "devDependencies": {
+    "@tabler/icons-react": "^3.46.0",
+    "@vitejs/plugin-react": "5.0.4",
+    "electron": "43.2.0",
+    "electron-builder": "^26.15.3",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.2"
+  },
+  "build": {
+    "appId": "com.xujack.xhscollector.multiaccount",
+    "productName": "小红书多账号采集工作台",
+    "asar": true,
+    "compression": "maximum",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public/assets/ai-collector-icon.png",
+        "to": "ai-collector-icon.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "public/assets/ai-collector-icon.icns",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "${productName} ${version}",
+      "icon": "public/assets/ai-collector-icon.icns",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 150,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 390,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  }
+}

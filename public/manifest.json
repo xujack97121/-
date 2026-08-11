@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "小红书多账号采集工作台",
+  "version": "2.0.1",
+  "description": "从当前浏览器标签整理公开笔记与评论；多账号隔离登录与完整操作队列请使用桌面版。",
+  "icons": {
+    "16": "assets/app-icon-16.png",
+    "32": "assets/app-icon-32.png",
+    "48": "assets/app-icon-48.png",
+    "128": "assets/app-icon-128.png"
+  },
+  "permissions": ["storage", "tabs", "sidePanel", "downloads"],
+  "host_permissions": ["https://www.xiaohongshu.com/*", "https://edith.xiaohongshu.com/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "打开采集工作台",
+    "default_icon": {
+      "16": "assets/app-icon-16.png",
+      "32": "assets/app-icon-32.png",
+      "48": "assets/app-icon-48.png",
+      "128": "assets/app-icon-128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.xiaohongshu.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.xiaohongshu.com/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

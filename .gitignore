@@ -1,0 +1,58 @@
+# Dependencies and generated output
+node_modules/
+dist/
+release/
+.npm-cache/
+.vite/
+.cache/
+coverage/
+.nyc_output/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.cer
+*.crt
+*.mobileprovision
+*.provisionprofile
+
+# Runtime data and logs
+multi-accounts.json
+multi-accounts.json*.tmp
+*.log
+*.dmp
+*.dmg
+*.blockmap
+*.asar
+builder-debug.yml
+builder-effective-config.yaml
+Partitions/
+Local Storage/
+Session Storage/
+WebStorage/
+Network/
+Cookies
+Cookies-journal
+Cache/
+Code Cache/
+GPUCache/
+DawnCache/
+Crashpad/
+Network Persistent State
+Preferences
+
+# macOS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Internal design and QA evidence
+AGENTS.md
+references/
+design-options/
+public/assets/xhs-search-reference.jpg
