@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  IconChartBar,
   IconDots,
   IconHome,
   IconLogin2,
@@ -14,7 +15,8 @@ import {
 import { randomizeComment } from "./comment-randomizer.js";
 import { randomizeOperationInterval } from "./operation-interval.js";
 import { actionResultLabel, isActionComplete, taskTimingLabel } from "./operation-status.js";
-import { commentMatchesTimeRange, noteMatchesTimeRange } from "./comment-time-filter.js";
+import { commentMatchesTimeRange, normalizeNoteTime, noteMatchesTimeRange } from "./comment-time-filter.js";
+import { AnalyticsPage } from "./AnalyticsPage.jsx";
 
 const demoNotes = [
   { id: "65a2-demo-01", author: "张六千", authorId: "653500d40000", title: "没钱还想创业？互联网是年轻人的第一桶金", link: "https://www.xiaohongshu.com/explore/65a2-demo-01", likes: 2529, type: "视频", time: "2小时前", source: "搜索" },
@@ -114,6 +116,169 @@ function fallbackAccount(extensionMode) {
   };
 }
 
+function finiteNumber(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function optionalNumber(value) {
+  if (value == null || (typeof value === "string" && !value.trim())) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeRect(rect = {}) {
+  const left = finiteNumber(rect.left, finiteNumber(rect.x, 0));
+  const top = finiteNumber(rect.top, finiteNumber(rect.y, 0));
+  const right = finiteNumber(rect.right, left + Math.max(0, finiteNumber(rect.width, 0)));
+  const bottom = finiteNumber(rect.bottom, top + Math.max(0, finiteNumber(rect.height, 0)));
+  return { left, top, right, bottom };
+}
+
+function clampBrowserBounds(previewRect, paneRect, viewport = {}) {
+  const preview = normalizeRect(previewRect);
+  const pane = normalizeRect(paneRect ?? previewRect);
+  const viewportWidth = Math.max(0, finiteNumber(viewport.width, Number.POSITIVE_INFINITY));
+  const viewportHeight = Math.max(0, finiteNumber(viewport.height, Number.POSITIVE_INFINITY));
+  const left = Math.ceil(Math.max(0, preview.left, pane.left));
+  const top = Math.ceil(Math.max(0, preview.top, pane.top));
+  const right = Math.floor(Math.min(viewportWidth, preview.right, pane.right));
+  const bottom = Math.floor(Math.min(viewportHeight, preview.bottom, pane.bottom));
+  if (right <= left || bottom <= top) return { x: 0, y: 0, width: 1, height: 1 };
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+const DASHBOARD_CAPTURE_LABELS = {
+  notes: "搜索笔记采集中",
+  author: "作者笔记采集中",
+  comments: "笔记评论采集中",
+};
+
+const DASHBOARD_CAPTURE_TABS = {
+  notes: "search",
+  author: "author",
+  comments: "comments",
+};
+
+function dashboardCount(value) {
+  return Math.max(0, Math.floor(Number.isFinite(Number(value)) ? Number(value) : 0));
+}
+
+function dashboardCapture(capture = {}) {
+  const collected = dashboardCount(capture.collected);
+  const target = dashboardCount(capture.target);
+  return {
+    collected,
+    target,
+    percent: target > 0 ? Math.min(100, Math.round((collected / target) * 100)) : 0,
+  };
+}
+
+function dashboardPageLabel(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return "等待打开小红书页面";
+    return `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return "等待打开小红书页面";
+  }
+}
+
+function completedOperationCount(tasks) {
+  return tasks.filter((task) => /^已完成(?:\s|$)/.test(String(task?.status || ""))).length;
+}
+
+function failedOperationCount(tasks) {
+  return tasks.filter((task) => /失败/.test(String(task?.status || ""))).length;
+}
+
+function dashboardRow(account = {}, workspace = {}, runtime = {}) {
+  const capture = dashboardCapture(account.capture);
+  const captureActive = Boolean(account.capture?.active);
+  const queueRunning = Boolean(workspace.operation?.running);
+  const operationActive = Boolean(account.operationActive);
+  const pageCrashed = Boolean(account.crashed);
+  const runtimeFailed = runtime.phase === "error";
+  const operationTasks = Array.isArray(workspace.operationTasks) ? workspace.operationTasks : [];
+  const commentTasks = Array.isArray(workspace.commentTasks) ? workspace.commentTasks : [];
+  let state = "idle";
+  let stateLabel = "空闲";
+
+  if (pageCrashed || runtimeFailed) {
+    state = "error";
+    stateLabel = pageCrashed ? "页面异常" : "任务异常";
+  } else if (queueRunning) {
+    state = "queue";
+    stateLabel = operationActive ? "自动化操作中" : "自动化队列等待中";
+  } else if (captureActive) {
+    state = "capture";
+    stateLabel = DASHBOARD_CAPTURE_LABELS[account.capture?.kind] || "采集中";
+  } else if (operationActive) {
+    state = "operation";
+    stateLabel = "笔记操作中";
+  } else if (account.loading) {
+    state = "loading";
+    stateLabel = "页面加载中";
+  }
+
+  const targetTab = queueRunning || operationActive
+    ? "safe"
+    : DASHBOARD_CAPTURE_TABS[account.capture?.kind] || workspace.ui?.activeTab || "search";
+
+  return {
+    id: String(account.id || account.accountId || ""),
+    name: String(account.name || "未命名账号"),
+    nickname: String(account.profileName || account.nickname || ""),
+    avatarUrl: account.avatarUrl || "",
+    loginPhase: account.loginPhase || "unknown",
+    active: Boolean(account.active),
+    state,
+    stateLabel,
+    runtimeMessage: String(runtime.message || ""),
+    capture,
+    captureActive,
+    canStopCapture: captureActive,
+    operationActive,
+    queueRunning,
+    notesCount: Array.isArray(workspace.notes) ? workspace.notes.length : 0,
+    commentsCount: Array.isArray(workspace.comments) ? workspace.comments.length : 0,
+    commentQueueCount: commentTasks.length,
+    operationQueueCount: operationTasks.length,
+    operationCompletedCount: completedOperationCount(operationTasks),
+    operationFailedCount: failedOperationCount(operationTasks),
+    updatedAt: dashboardCount(workspace.stats?.updatedAt),
+    pageLabel: dashboardPageLabel(account.url || workspace.ui?.currentUrl),
+    targetTab,
+  };
+}
+
+function dashboardRows(accounts = [], workspaces = {}, runtimeStatuses = {}) {
+  return accounts
+    .filter((account) => account?.id)
+    .map((account) => dashboardRow(account, workspaces[account.id] || {}, runtimeStatuses[account.id] || {}));
+}
+
+function dashboardSummary(rows = []) {
+  return {
+    total: rows.length,
+    loggedIn: rows.filter((row) => row.loginPhase === "logged-in").length,
+    collecting: rows.filter((row) => row.captureActive).length,
+    queueRunning: rows.filter((row) => row.queueRunning || row.operationActive).length,
+    errors: rows.filter((row) => row.state === "error").length,
+  };
+}
+
+function dashboardUpdatedAt(value, now = Date.now()) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "暂无采集结果";
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (seconds < 10) return "刚刚更新";
+  if (seconds < 60) return `${seconds} 秒前更新`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前更新`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours} 小时前更新` : `${Math.floor(hours / 24)} 天前更新`;
+}
+
 function noteIdFromUrl(rawUrl) {
   try {
     const match = new URL(rawUrl).pathname.match(/\/(?:explore|discovery\/item)\/([a-f\d]{24})/i);
@@ -180,8 +345,12 @@ function mergeComments(previous, incoming, max = 10000) {
 }
 
 function mergeNotes(previous, incoming, max = 5000) {
-  const merged = new Map((previous ?? []).map((note) => [note.id, note]));
-  for (const note of incoming ?? []) {
+  const merged = new Map((previous ?? []).map((note) => {
+    const normalized = normalizeNoteTime(note);
+    return [normalized.id, normalized];
+  }));
+  for (const rawNote of incoming ?? []) {
+    const note = normalizeNoteTime(rawNote);
     const existing = merged.get(note.id);
     merged.set(note.id, existing ? { ...existing, ...note, time: note.time || existing.time || "" } : note);
   }
@@ -276,7 +445,7 @@ function normalizeWorkspace(value, realMode) {
   return {
     ...base,
     ...workspace,
-    notes: Array.isArray(workspace.notes) ? workspace.notes : base.notes,
+    notes: (Array.isArray(workspace.notes) ? workspace.notes : base.notes).map((note) => normalizeNoteTime(note)),
     comments: dedupeComments(Array.isArray(workspace.comments) ? workspace.comments : base.comments),
     stats: { ...base.stats, ...(workspace.stats ?? {}) },
     ui: { ...base.ui, ...(workspace.ui ?? {}), live: false },
@@ -371,7 +540,7 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
       const accountId = resolveEventAccountId(payload, activeAccountRef.current, accountsRef.current.length);
       // Multi-account events without an owner are discarded instead of contaminating
       // whichever account happens to be visible when the event arrives.
-      if (!accountId) return;
+      if (!accountId || !String(payload.runId || "").trim() || payload.kind === "passive") return;
       updateWorkspace(accountId, (workspace) => {
         const notes = mergeNotes(workspace.notes, payload.notes, 5000);
         const comments = mergeComments(workspace.comments, payload.comments, 10000);
@@ -396,7 +565,7 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
     if (!extensionMode || !activeAccountId) return undefined;
     const hydrate = (result) => updateWorkspace(activeAccountId, (workspace) => ({
       ...workspace,
-      notes: result.collectorNotes ?? [],
+      notes: (result.collectorNotes ?? []).map((note) => normalizeNoteTime(note)),
       comments: dedupeComments(result.collectorComments ?? []),
       stats: result.captureStats ?? { captures: 0 },
     }));
@@ -405,7 +574,7 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
       if (area !== "local") return;
       updateWorkspace(activeAccountId, (workspace) => ({
         ...workspace,
-        notes: changes.collectorNotes ? (changes.collectorNotes.newValue ?? []) : workspace.notes,
+        notes: changes.collectorNotes ? (changes.collectorNotes.newValue ?? []).map((note) => normalizeNoteTime(note)) : workspace.notes,
         comments: changes.collectorComments ? dedupeComments(changes.collectorComments.newValue ?? []) : workspace.comments,
         stats: changes.captureStats ? (changes.captureStats.newValue ?? {}) : workspace.stats,
       }));
@@ -469,7 +638,7 @@ function StatusDot({ active, phase = "unknown" }) {
   return <span className={`status-dot ${active ? "active" : ""} phase-${phase}`} aria-hidden="true" />;
 }
 
-function AccountBar({ accounts, activeAccountId, desktopMode, onSwitch, onAdd, onRename, onRemove, onRefresh }) {
+function AccountBar({ accounts, activeAccountId, desktopMode, dashboardOpen, onDashboardToggle, onSwitch, onAdd, onRename, onRemove, onRefresh }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? accounts[0];
 
@@ -515,6 +684,17 @@ function AccountBar({ accounts, activeAccountId, desktopMode, onSwitch, onAdd, o
         })}
         {!accounts.length && <span className="account-empty">还没有账号</span>}
       </div>
+      <button
+        className={`account-dashboard-toggle ${dashboardOpen ? "active" : ""}`}
+        type="button"
+        aria-pressed={dashboardOpen}
+        aria-current={dashboardOpen ? "page" : undefined}
+        aria-controls="all-accounts-dashboard"
+        onClick={onDashboardToggle}
+        title="查看所有账号采集进度"
+      >
+        <IconChartBar size={17} stroke={1.9} /> <span>总看板</span>
+      </button>
       <button className="account-add" type="button" disabled={!desktopMode} onClick={onAdd} title={desktopMode ? "创建独立登录账号" : "多账号登录仅在桌面版可用"}>
         <IconPlus size={17} stroke={2} /> <span>添加账号</span>
       </button>
@@ -536,6 +716,122 @@ function AccountBar({ accounts, activeAccountId, desktopMode, onSwitch, onAdd, o
         )}
       </div>
     </div>
+  );
+}
+
+function AccountsDashboard({ rows, summary, desktopMode, onOpenAccount, onOpenData, onRefresh, onStopCapture }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <section className="accounts-dashboard" id="all-accounts-dashboard" aria-labelledby="accounts-dashboard-title">
+      <header className="dashboard-heading">
+        <div>
+          <span className="dashboard-eyebrow">实时总览</span>
+          <h2 id="accounts-dashboard-title">全部账号采集进度</h2>
+          <p>切换查看不会中断其他账号正在运行的任务。</p>
+        </div>
+        <div
+          className="dashboard-summary"
+          aria-live="polite"
+          aria-label={`共 ${summary.total} 个账号，${summary.loggedIn} 个已登录，${summary.collecting} 个采集中，${summary.queueRunning} 个自动化队列运行中，${summary.errors} 个异常`}
+        >
+          <span><strong>{summary.total}</strong><small>全部账号</small></span>
+          <span><strong>{summary.loggedIn}</strong><small>已登录</small></span>
+          <span className="collecting"><strong>{summary.collecting}</strong><small>采集中</small></span>
+          <span className="operating"><strong>{summary.queueRunning}</strong><small>自动化中</small></span>
+          <span className={summary.errors ? "error" : ""}><strong>{summary.errors}</strong><small>异常</small></span>
+        </div>
+      </header>
+
+      <div className="dashboard-card-grid">
+        {rows.map((row) => {
+          const phaseLabel = loginPhaseLabel({ loginPhase: row.loginPhase }, desktopMode);
+          const running = row.captureActive || row.queueRunning || row.operationActive;
+          return (
+            <article
+              className={`dashboard-account-card state-${row.state} ${row.active ? "current" : ""}`}
+              aria-label={`${row.name}，${phaseLabel}，${row.stateLabel}`}
+              key={row.id}
+            >
+              <div className="dashboard-card-head">
+                <span className="dashboard-avatar">
+                  {row.avatarUrl ? <img src={row.avatarUrl} alt="" /> : <IconUserCircle size={25} stroke={1.5} />}
+                </span>
+                <span className="dashboard-account-name">
+                  <span className="dashboard-account-title-row">
+                    <strong title={row.name}>{row.name}</strong>
+                    <button
+                      className="dashboard-login-check"
+                      type="button"
+                      disabled={!desktopMode}
+                      onClick={() => onRefresh(row.id)}
+                      title="检查登录"
+                      aria-label={`检查 ${row.name} 的登录状态`}
+                    >
+                      <IconLogin2 size={14} stroke={1.8} />
+                    </button>
+                  </span>
+                  <small>{row.nickname && row.nickname !== row.name ? row.nickname : phaseLabel}</small>
+                </span>
+                {row.active && <span className="current-account-pill">当前</span>}
+                <span className={`dashboard-state state-${row.state}`}>
+                  <StatusDot active={running} phase={row.state === "error" ? "error" : running ? "running" : row.loginPhase} />
+                  {row.stateLabel}
+                </span>
+              </div>
+
+              <div className="dashboard-progress-block">
+                <div className="dashboard-progress-copy">
+                  <strong>{row.captureActive || row.queueRunning ? row.stateLabel : "当前无采集任务"}</strong>
+                  <span>{row.captureActive ? `${row.capture.collected} / ${row.capture.target}` : row.queueRunning ? `${row.operationCompletedCount} / ${row.operationQueueCount} 条操作` : "—"}</span>
+                </div>
+                <div
+                  className="dashboard-progress-track"
+                  role="progressbar"
+                  aria-label={`${row.name}采集进度`}
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={row.captureActive ? row.capture.percent : 0}
+                >
+                  <span style={{ width: `${row.captureActive ? row.capture.percent : 0}%` }} />
+                </div>
+                {row.runtimeMessage && <p className="dashboard-runtime-message" title={row.runtimeMessage}>{row.runtimeMessage}</p>}
+              </div>
+
+              <dl className="dashboard-metrics">
+                <div><dt>笔记结果</dt><dd>{row.notesCount}</dd></div>
+                <div><dt>评论结果</dt><dd>{row.commentsCount}</dd></div>
+                <div><dt>评论队列</dt><dd>{row.commentQueueCount}</dd></div>
+                <div><dt>操作队列</dt><dd>{row.operationCompletedCount}/{row.operationQueueCount}</dd></div>
+              </dl>
+
+              <div className="dashboard-page-row">
+                <span title={row.pageLabel}>{row.pageLabel}</span>
+                <small>{dashboardUpdatedAt(row.updatedAt, now)}</small>
+              </div>
+
+              <div className="dashboard-card-actions">
+                <button className="button primary" type="button" onClick={() => onOpenAccount(row.id, row.targetTab)}>打开账号</button>
+                {row.canStopCapture && <button className="button" type="button" onClick={() => onStopCapture(row.id)}>停止采集</button>}
+                <button className="button" type="button" onClick={() => onOpenData(row.id)}>查看数据</button>
+              </div>
+            </article>
+          );
+        })}
+        {!rows.length && (
+          <div className="dashboard-empty">
+            <IconUserCircle size={34} stroke={1.4} />
+            <strong>还没有账号</strong>
+            <span>添加账号后，这里会显示每个账号的实时采集进度。</span>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -693,8 +989,13 @@ function NotesTable({ rows, selected, setSelected, onOpenLink, onQueueComments, 
   );
 }
 
-function SearchPanel({ accountId, accountName, data, state, setState, keyword, setKeyword, setCurrentUrl, live, setLive, notify, openNote, onQueueComments, onQueueOperations }) {
+function SearchPanel({ accountId, accountName, capture, data, state, setState, keyword, setKeyword, setCurrentUrl, live, setLive, notify, openNote, onQueueComments, onQueueOperations }) {
   const { limit = 100, minLikes = 0, type = "全部", timeRange = "all" } = state;
+  const searchCapture = capture?.kind === "notes" ? capture : null;
+  const collectionActive = data.desktopMode ? Boolean(searchCapture?.active) : live;
+  const capturedThisRun = Math.max(0, Math.floor(Number(searchCapture?.collected) || 0));
+  const captureTarget = Math.max(1, Math.floor(Number(searchCapture?.target) || Number(limit) || 100));
+  const progressLabel = searchCapture ? `本轮 ${capturedThisRun} / ${captureTarget}` : "本轮尚未开始";
   const selected = useMemo(() => new Set(state.selectedIds ?? []), [state.selectedIds]);
   const setSelected = (value) => setState((current) => {
     const previous = new Set(current.selectedIds ?? []);
@@ -704,14 +1005,16 @@ function SearchPanel({ accountId, accountName, data, state, setState, keyword, s
   const fileRef = useRef(null);
   const filtered = useMemo(() => data.notes.filter((note) => Number(note.likes) >= Number(minLikes)
     && (type === "全部" || note.type === type)
-    && noteMatchesTimeRange(note.time, timeRange)).slice(0, limit), [data.notes, limit, minLikes, timeRange, type]);
+    && noteMatchesTimeRange(note, timeRange)).slice(0, limit), [data.notes, limit, minLikes, timeRange, type]);
 
   const openSearch = async () => {
+    const target = Math.min(1000, Math.max(1, Math.floor(Number(limit) || 100)));
     const url = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword.trim() || "创业")}`;
+    if (target !== limit) setState({ limit: target });
     setCurrentUrl(url);
     try {
       if (data.desktopMode) {
-        await callDesktop("startTask", accountId, { kind: "notes", url, target: limit });
+        await callDesktop("startTask", accountId, { kind: "notes", url, target });
         setLive(true);
         notify("真实搜索页已打开，正在监听响应并自动滚动。", "success");
       } else if (data.extensionMode) {
@@ -727,9 +1030,13 @@ function SearchPanel({ accountId, accountName, data, state, setState, keyword, s
   };
 
   const stopSearch = async () => {
-    if (data.desktopMode) await callDesktop("stopTask", accountId);
-    setLive(false);
-    notify("采集已停止。", "info");
+    try {
+      if (data.desktopMode) await callDesktop("stopTask", accountId);
+      setLive(false);
+      notify("采集已停止。", "info");
+    } catch (error) {
+      notify(`停止失败：${error.message}`, "error");
+    }
   };
 
   const removeSelected = async () => {
@@ -741,7 +1048,7 @@ function SearchPanel({ accountId, accountName, data, state, setState, keyword, s
     if (!file) return;
     const parsed = parseCsv(await file.text()).map((row, index) => ({
       id: row.ID || row.id || `import-${Date.now()}-${index}`, author: row.作者 || row.author || "未知作者", title: row.标题 || row.title || "",
-      link: row.笔记链接 || row.link || "", likes: Number(row.点赞数 || row.likes || 0), type: row.类型 || row.type || "笔记", time: row.发布时间 || row.time || "", source: "导入",
+      link: row.笔记链接 || row.link || "", likes: optionalNumber(row.点赞数 ?? row.likes), type: row.类型 || row.type || "笔记", time: row.发布时间 || row.time || "", source: "导入",
     }));
     const merged = Array.from(new Map([...data.notes, ...parsed].map((row) => [row.id || row.link, row])).values());
     data.setNotes(merged); await data.save(merged, data.comments); notify(`已导入 ${parsed.length} 条笔记。`, "success");
@@ -754,9 +1061,9 @@ function SearchPanel({ accountId, accountName, data, state, setState, keyword, s
           <legend>视频采集区</legend>
           <label>搜索词 <input value={keyword} onChange={(event) => setKeyword(event.target.value)} /></label>
           <label>数量 <input className="short" type="number" min="1" max="1000" value={limit} onChange={(event) => setState({ limit: Number(event.target.value) })} /></label>
-          <button className="button primary" type="button" onClick={openSearch}>{live ? "重新采集" : "采集笔记"}</button>
-          {data.desktopMode && <button className="button" type="button" disabled={!live} onClick={stopSearch}>停止</button>}
-          <span className="count-hint">共 {data.notes.length} 条，显示 {filtered.length} 条</span>
+          <button className="button primary" type="button" onClick={openSearch}>{collectionActive ? "重新采集" : "采集笔记"}</button>
+          {data.desktopMode && <button className="button" type="button" disabled={!collectionActive} onClick={stopSearch}>停止</button>}
+          <span className="count-hint">{progressLabel} · 累计 {data.notes.length} 条 · 当前显示 {filtered.length} 条</span>
         </fieldset>
         <fieldset>
           <legend>条件筛选</legend>
@@ -796,6 +1103,10 @@ function AuthorPanel({ accountId, accountName, data, state, setState, setCurrent
     setTasks((previous) => previous.some((task) => task.url === url) ? previous : [...previous, { url, status: "待采集" }]);
     notify("作者链接已加入任务列表。", "success");
   };
+  const removeTask = (task) => {
+    setTasks((previous) => previous.filter((item) => item.url !== task.url));
+    notify(["监听中", "正在打开"].includes(task.status) ? "作者链接已从列表删除；当前采集不会自动停止。" : "作者链接已从任务列表删除。", "success");
+  };
   const start = async (task) => {
     setCurrentUrl(task.url); setLive(true);
     setTasks((previous) => previous.map((item) => item.url === task.url ? { ...item, status: "监听中" } : item));
@@ -820,7 +1131,7 @@ function AuthorPanel({ accountId, accountName, data, state, setState, setCurrent
       <div className="author-layout">
         <fieldset className="task-box"><legend>作者任务</legend>
           <div className="inline-form"><input value={url} onChange={(event) => setState({ url: event.target.value })} /><button className="button" onClick={addTask}>添加作者链接</button></div>
-          <div className="task-list">{tasks.length ? tasks.map((task, index) => <div className="task-item" key={task.url}><span>{index + 1}</span><code>{task.url}</code><b>{task.status}</b><button className="button compact" onClick={() => start(task)}>开始</button></div>) : <div className="empty-task">暂无作者任务</div>}</div>
+          <div className="task-list">{tasks.length ? tasks.map((task, index) => <div className="task-item" key={task.url}><span>{index + 1}</span><code title={task.url}>{task.url}</code><b>{task.status}</b><button className="button compact task-delete-button" type="button" aria-label={`删除作者任务 ${index + 1}`} title="删除作者任务" onClick={() => removeTask(task)}><IconTrash size={14} /></button><button className="button compact" type="button" onClick={() => start(task)}>开始</button></div>) : <div className="empty-task">暂无作者任务</div>}</div>
         </fieldset>
         <fieldset className="backup-box"><legend>配置区</legend>
           <label>翻页间隔 <input className="short" type="number" value={intervalSeconds} min="2" onChange={(event) => setState({ intervalSeconds: Number(event.target.value) })} /> 秒</label>
@@ -878,6 +1189,11 @@ function CommentsPanel({ accountId, accountName, data, state, setState, tasks, s
   };
 
   const toggleTask = (task, checked) => setTasks((previous) => previous.map((item) => (item.id || item.link) === (task.id || task.link) ? { ...item, selected: checked } : item));
+  const removeTask = (task) => {
+    const key = task.id || task.link;
+    setTasks((previous) => previous.filter((item) => (item.id || item.link) !== key));
+    notify(["监听中", "正在打开"].includes(task.status) ? "笔记链接已从队列删除；当前采集不会自动停止。" : "笔记链接已从评论采集队列删除。", "success");
+  };
   const deleteSelectedTasks = () => {
     const count = tasks.filter((task) => task.selected).length;
     setTasks((previous) => previous.filter((task) => !task.selected));
@@ -887,7 +1203,7 @@ function CommentsPanel({ accountId, accountName, data, state, setState, tasks, s
   return (
     <div className="panel-body">
       <div className="comments-top">
-        <fieldset className="link-box"><legend>笔记链接</legend><div className="inline-form"><input value={url} onChange={(event) => setState({ url: event.target.value })} /><button className="button" onClick={addAndStart}>添加并打开</button></div><div className="link-list">{tasks.map((task, index) => <div key={task.id || task.link}><input aria-label={`选择评论任务 ${task.title}`} type="checkbox" checked={Boolean(task.selected)} onChange={(event) => toggleTask(task, event.target.checked)} /><span>{index + 1}</span><code title={task.link}>{task.title || task.link}</code><b>{task.status || "待采集"}</b><button className="button compact" onClick={() => start(task)}>采集</button></div>)}{!tasks.length && <span className="empty-task">暂无链接；可在笔记表格右键加入</span>}</div></fieldset>
+        <fieldset className="link-box"><legend>笔记链接</legend><div className="inline-form"><input value={url} onChange={(event) => setState({ url: event.target.value })} /><button className="button" onClick={addAndStart}>添加并打开</button></div><div className="link-list">{tasks.map((task, index) => <div key={task.id || task.link}><input aria-label={`选择评论任务 ${task.title}`} type="checkbox" checked={Boolean(task.selected)} onChange={(event) => toggleTask(task, event.target.checked)} /><span>{index + 1}</span><code title={task.link}>{task.title || task.link}</code><b>{task.status || "待采集"}</b><button className="button compact task-delete-button" type="button" aria-label={`删除评论任务 ${task.title || index + 1}`} title="删除笔记链接" onClick={() => removeTask(task)}><IconTrash size={14} /></button><button className="button compact" type="button" onClick={() => start(task)}>采集</button></div>)}{!tasks.length && <span className="empty-task">暂无链接；可在笔记表格右键加入</span>}</div></fieldset>
         <fieldset className="comment-filter"><legend>条件筛选</legend><label>地区含 <input value={region} onChange={(event) => setState({ region: event.target.value })} /></label><label>评论含 <input value={contains} onChange={(event) => setState({ contains: event.target.value })} /></label><label>发布时间 <select aria-label="发布时间" value={timeRange} onChange={(event) => setState({ timeRange: event.target.value })}><option value="all">不限</option><option value="day">一天内</option><option value="week">一周内</option><option value="month">一月内</option><option value="half-year">半年内</option></select></label><label><input type="checkbox" checked={unique} onChange={(event) => setState({ unique: event.target.checked })} /> 去除重复发言用户</label></fieldset>
       </div>
       <div className="action-row"><button className="button" onClick={deleteSelectedTasks}>移除选中任务</button><button className="button" onClick={() => setState({ region: "", contains: "", timeRange: "all" })}>清空筛选</button><button className="button" onClick={() => { data.clearComments(); notify("评论列表已清空。") }}>全部删除评论</button>{data.desktopMode && <button className="button" onClick={() => { callDesktop("stopTask", accountId); setLive(false); }}>停止采集</button>}<span className="spacer" /><strong>{rows.length} / {data.comments.length}</strong><button className="button" onClick={() => downloadCsv(`${accountName}-笔记评论.csv`, rows, [{ key: "noteId", label: "笔记ID" }, { key: "time", label: "时间" }, { key: "nickname", label: "昵称" }, { key: "content", label: "评论内容" }, { key: "authorId", label: "公开UID（已脱敏）" }, { key: "region", label: "地区" }])}>导出 CSV</button></div>
@@ -1073,6 +1389,10 @@ export function App() {
   const [toast, setToast] = useState(null);
   const [accountDialog, setAccountDialog] = useState(null);
   const [accountBusy, setAccountBusy] = useState(false);
+  const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [analysisAccountId, setAnalysisAccountId] = useState(null);
+  const [analysisMounted, setAnalysisMounted] = useState(false);
+  const [runtimeStatuses, setRuntimeStatuses] = useState({});
   const toastTimerRef = useRef(null);
   const accountsRef = useRef(accounts);
   const activeAccountRef = useRef(activeAccountId);
@@ -1154,12 +1474,18 @@ export function App() {
   }));
   const setUi = (patch, accountId = activeAccountId) => setWorkspaceSection("ui", patch, accountId);
   const setActiveTab = (value) => setUi({ activeTab: value });
+  const openWorkbenchTab = (value) => {
+    setAnalysisAccountId(null);
+    setDashboardOpen(false);
+    setActiveTab(value);
+  };
   const setKeyword = (value) => setUi({ keyword: typeof value === "function" ? value(keyword) : value });
   const setCurrentUrl = (value) => setUi({ currentUrl: typeof value === "function" ? value(currentUrl) : value });
   const setLive = (value) => setUi({ live: typeof value === "function" ? value(live) : value });
   const setCommentTasks = (value) => setWorkspaceList("commentTasks", value);
   const setOperationTasks = (value) => setWorkspaceList("operationTasks", value);
   const panelNotify = (message, type = "info") => notifyForAccount(activeAccountId, message, type);
+  const analysisOpen = analysisAccountId !== null;
 
   useEffect(() => {
     for (const account of accounts) {
@@ -1190,7 +1516,18 @@ export function App() {
       unsubscribers.push(desktop.onStatus((status = {}) => {
         const accountId = resolveEventAccountId(status, activeAccountRef.current, accountsRef.current.length);
         if (!accountId) return;
-        setWorkspaceSection("ui", { live: Boolean(status.active ?? status.capture?.active ?? status.operationActive) }, accountId);
+        setRuntimeStatuses((previous) => ({
+          ...previous,
+          [accountId]: {
+            phase: String(status.phase || ""),
+            message: String(status.message || ""),
+            runId: String(status.runId || ""),
+            updatedAt: Date.now(),
+          },
+        }));
+        const explicitActive = [status.active, status.capture?.active, status.operationActive]
+          .find((value) => typeof value === "boolean");
+        if (typeof explicitActive === "boolean") setWorkspaceSection("ui", { live: explicitActive }, accountId);
         if (status.phase === "error") notifyForAccount(accountId, status.message || "任务执行异常。", "error");
         else if (status.phase === "stopped") notifyForAccount(accountId, status.message || "任务已停止。", "success");
       }));
@@ -1200,18 +1537,27 @@ export function App() {
 
   useEffect(() => {
     if (!desktopMode || !activeAccountId) return undefined;
+    if (analysisOpen || dashboardOpen) {
+      desktop.setBrowserBounds({ x: 0, y: 0, width: 1, height: 1 });
+      return undefined;
+    }
     const preview = document.querySelector(".browser-preview");
+    const browserPane = preview?.closest(".browser-pane");
     if (!preview) return undefined;
     const updateBounds = () => {
-      const rect = preview.getBoundingClientRect();
-      desktop.setBrowserBounds({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      desktop.setBrowserBounds(clampBrowserBounds(
+        preview.getBoundingClientRect(),
+        browserPane?.getBoundingClientRect(),
+        { width: window.innerWidth, height: window.innerHeight },
+      ));
     };
     const observer = new ResizeObserver(updateBounds);
     observer.observe(preview);
+    if (browserPane) observer.observe(browserPane);
     window.addEventListener("resize", updateBounds);
     const frame = requestAnimationFrame(updateBounds);
     return () => { observer.disconnect(); window.removeEventListener("resize", updateBounds); cancelAnimationFrame(frame); };
-  }, [activeAccountId, desktop, desktopMode]);
+  }, [activeAccountId, analysisOpen, dashboardOpen, desktop, desktopMode]);
 
   const switchAccount = async (accountId) => {
     if (!accountId || accountId === activeAccountId) return;
@@ -1220,6 +1566,39 @@ export function App() {
       setActiveAccountId(accountId);
     } catch (error) {
       notify(`切换账号失败：${error.message}`, "error");
+    }
+  };
+
+  const openDashboardAccount = async (accountId, targetTab) => {
+    if (targetTab) setWorkspaceSection("ui", { activeTab: targetTab }, accountId);
+    await switchAccount(accountId);
+    setAnalysisAccountId(null);
+    setDashboardOpen(false);
+  };
+
+  const openAccountAnalysis = (accountId) => {
+    setDashboardOpen(false);
+    setAnalysisMounted(true);
+    setAnalysisAccountId(accountId || "");
+  };
+
+  const closeAccountAnalysis = () => {
+    setAnalysisAccountId(null);
+    setDashboardOpen(true);
+  };
+
+  const refreshDashboardAccountStatus = async (accountId) => {
+    const account = accountsRef.current.find((item) => item.id === accountId);
+    if (account) await refreshAccountStatus(account);
+  };
+
+  const stopDashboardCapture = async (accountId) => {
+    try {
+      await callDesktop("stopTask", accountId);
+      setWorkspaceSection("ui", { live: false }, accountId);
+      notifyForAccount(accountId, "采集已停止。", "info");
+    } catch (error) {
+      notifyForAccount(accountId, `停止采集失败：${error.message}`, "error");
     }
   };
 
@@ -1300,6 +1679,27 @@ export function App() {
       panelNotify(`打开笔记失败：${error.message}`, "error");
     }
   };
+  const openAnalyticsNote = async (accountId, note) => {
+    if (!data.realMode || !note?.link) return;
+    try {
+      if (data.desktopMode) {
+        if (accountId && accountId !== activeAccountId && typeof accountApi?.switch === "function") await accountApi.switch(accountId);
+        if (accountId) setActiveAccountId(accountId);
+        const result = await callDesktop("openNote", accountId || activeAccountId, { id: note.id, link: note.link, title: note.title });
+        setWorkspaceSection("ui", { activeTab: "search", currentUrl: result.url, live: false }, accountId || activeAccountId);
+      } else {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error("没有可用的小红书标签页");
+        await chrome.tabs.update(tab.id, { url: note.link });
+        setWorkspaceSection("ui", { activeTab: "search", currentUrl: note.link, live: false }, accountId || activeAccountId);
+      }
+      setAnalysisAccountId(null);
+      setDashboardOpen(false);
+      notifyForAccount(accountId || activeAccountId, "已打开来源笔记。", "success");
+    } catch (error) {
+      notifyForAccount(accountId || activeAccountId, `打开来源笔记失败：${error.message}`, "error");
+    }
+  };
   const queueComments = (notes) => {
     setCommentTasks((previous) => mergeQueue(previous, notes));
     setActiveTab("comments");
@@ -1314,15 +1714,25 @@ export function App() {
   const loggedInCount = accounts.filter((account) => account.loginPhase === "logged-in").length;
   const runningCount = accounts.filter((account) => Boolean(account.capture?.active || account.operationActive || workspaces[account.id]?.ui?.live || workspaces[account.id]?.operation?.running)).length;
   const activePhase = loginPhaseLabel(activeAccount, desktopMode);
+  const allDashboardRows = useMemo(
+    () => dashboardRows(accounts, workspaces, runtimeStatuses),
+    [accounts, runtimeStatuses, workspaces],
+  );
+  const allDashboardSummary = useMemo(() => dashboardSummary(allDashboardRows), [allDashboardRows]);
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${analysisOpen ? "analysis-view" : dashboardOpen ? "dashboard-view" : ""}`}>
       <header className="titlebar">
         <div className="brand-lockup"><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/ai-collector-icon.png`} alt="AI 采集" /><strong>小红书多账号采集工作台</strong><span>V2.0</span></div>
         <AccountBar
           accounts={accounts}
           activeAccountId={activeAccountId}
           desktopMode={desktopMode}
+          dashboardOpen={dashboardOpen}
+          onDashboardToggle={() => {
+            setAnalysisAccountId(null);
+            setDashboardOpen((open) => !open);
+          }}
           onSwitch={switchAccount}
           onAdd={() => setAccountDialog({ mode: "add", suggestedName: `账号 ${accounts.length + 1}` })}
           onRename={(account) => setAccountDialog({ mode: "rename", account })}
@@ -1330,20 +1740,42 @@ export function App() {
           onRefresh={refreshAccountStatus}
         />
       </header>
-      <nav className="tabs" aria-label="采集模块">{tabs.map((tab) => <button key={tab.id} type="button" className={activeTab === tab.id ? "active" : ""} disabled={tab.disabled || !activeAccountId} onClick={() => setActiveTab(tab.id)}>{tab.label}</button>)}</nav>
+      <nav className="tabs" aria-label="采集模块">{tabs.map((tab) => <button key={tab.id} type="button" className={!dashboardOpen && activeTab === tab.id ? "active" : ""} disabled={tab.disabled || !activeAccountId} onClick={() => openWorkbenchTab(tab.id)}>{tab.label}</button>)}</nav>
       <div className="workspace">
-        <BrowserPane account={activeAccount} keyword={keyword} currentUrl={currentUrl} live={live} muted={muted} extensionMode={data.extensionMode} desktopMode={data.desktopMode} onHome={goHome} onReload={reloadBrowser} onMuted={setMuted} />
+        {!analysisOpen && !dashboardOpen && <BrowserPane account={activeAccount} keyword={keyword} currentUrl={currentUrl} live={live} muted={muted} extensionMode={data.extensionMode} desktopMode={data.desktopMode} onHome={goHome} onReload={reloadBrowser} onMuted={setMuted} />}
         <section className="workbench">
-          {!activeAccountId ? (
+          {analysisMounted && (
+            <div className="analysis-route" hidden={!analysisOpen}>
+              <AnalyticsPage
+                accounts={accounts}
+                workspaces={workspaces}
+                initialAccountId={analysisAccountId}
+                onBack={closeAccountAnalysis}
+                onOpenAccount={openDashboardAccount}
+                onOpenNote={openAnalyticsNote}
+              />
+            </div>
+          )}
+          {!analysisOpen && (dashboardOpen ? (
+            <AccountsDashboard
+              rows={allDashboardRows}
+              summary={allDashboardSummary}
+              desktopMode={desktopMode}
+              onOpenAccount={openDashboardAccount}
+              onOpenData={openAccountAnalysis}
+              onRefresh={refreshDashboardAccountStatus}
+              onStopCapture={stopDashboardCapture}
+            />
+          ) : !activeAccountId ? (
             <div className="account-required"><IconUserCircle size={36} stroke={1.5} /><strong>先添加一个账号</strong><span>创建独立登录空间后，即可在左侧登录并开始采集。</span><button className="button primary" type="button" onClick={() => setAccountDialog({ mode: "add", suggestedName: "账号 1" })}>添加账号</button></div>
           ) : (
             <>
               <div className="panel-route" hidden={activeTab !== "safe"}><OperationPanel accountId={activeAccountId} data={data} state={workspace.operation} setState={(value) => setWorkspaceSection("operation", value)} tasks={operationTasks} setTasks={setOperationTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} /></div>
-              <div className="panel-route" hidden={activeTab !== "search"}><SearchPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.search} setState={(value) => setWorkspaceSection("search", value)} keyword={keyword} setKeyword={setKeyword} setCurrentUrl={setCurrentUrl} live={live} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} /></div>
+              <div className="panel-route" hidden={activeTab !== "search"}><SearchPanel accountId={activeAccountId} accountName={accountName} capture={activeAccount?.capture} data={data} state={workspace.search} setState={(value) => setWorkspaceSection("search", value)} keyword={keyword} setKeyword={setKeyword} setCurrentUrl={setCurrentUrl} live={live} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} /></div>
               <div className="panel-route" hidden={activeTab !== "author"}><AuthorPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.author} setState={(value) => setWorkspaceSection("author", value)} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} /></div>
               <div className="panel-route" hidden={activeTab !== "comments"}><CommentsPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.commentsPanel} setState={(value) => setWorkspaceSection("commentsPanel", value)} tasks={commentTasks} setTasks={setCommentTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} /></div>
             </>
-          )}
+          ))}
         </section>
       </div>
       <footer className="statusbar"><span><StatusDot active={live || activeAccount?.loginPhase === "logged-in"} phase={live ? "running" : activeAccount?.loginPhase} />{live ? `${accountName}任务运行中` : `${accountName} · ${activePhase}`}</span><span>{desktopMode ? `${loggedInCount} 个账号已登录${runningCount ? ` · ${runningCount} 个运行中` : ""}` : "多账号需桌面版"}</span><span>本地独立存储</span><span>不导出 Cookie</span><span className="status-grow">每个账号的页面、采集结果和操作队列相互隔离</span></footer>

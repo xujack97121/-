@@ -6,7 +6,7 @@ function parseMetric(value) {
   if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
   const text = asText(value).trim().toLowerCase().replaceAll(",", "");
   const number = Number.parseFloat(text);
-  if (!Number.isFinite(number)) return 0;
+  if (!Number.isFinite(number)) return null;
   if (text.includes("万") || text.endsWith("w")) return Math.round(number * 10000);
   if (text.endsWith("k")) return Math.round(number * 1000);
   return Math.round(number);
@@ -25,6 +25,14 @@ function formatTime(value) {
   if (Number.isNaN(date.getTime())) return "";
   const pad = (part) => String(part).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function noteTimeFromId(value, now = Date.now()) {
+  const id = asText(value).trim();
+  if (!/^[a-f\d]{24}$/i.test(id)) return "";
+  const timestamp = Number.parseInt(id.slice(0, 8), 16) * 1000;
+  if (!Number.isFinite(timestamp) || timestamp < Date.UTC(2013, 0, 1) || timestamp > now + 5 * 60 * 1000) return "";
+  return formatTime(timestamp);
 }
 
 function stableId(value) {
@@ -93,10 +101,10 @@ function noteFromNode(node, sourceUrl) {
     authorId: maskPublicId(user.user_id || user.userId || user.id || user.red_id),
     title,
     link: noteLinkFromNode(node, card, sourceUrl, id),
-    likes: parseMetric(interaction.liked_count || interaction.likedCount || interaction.likes || card.liked_count),
+    likes: parseMetric(interaction.liked_count ?? interaction.likedCount ?? interaction.likes ?? card.liked_count),
     type: rawType.includes("video") ? "视频" : "笔记",
     time: formatTime(card.time || card.create_time || card.createTime || card.publish_time || card.publishTime
-      || node.time || node.create_time || node.createTime || node.publish_time || node.publishTime),
+      || node.time || node.create_time || node.createTime || node.publish_time || node.publishTime) || noteTimeFromId(id),
     source: source.label,
   };
 }
@@ -164,4 +172,4 @@ function normalizeCapture(sourceUrl, json) {
   };
 }
 
-module.exports = { normalizeCapture, normalizeDomComments, parseMetric, maskPublicId, formatTime };
+module.exports = { normalizeCapture, normalizeDomComments, parseMetric, maskPublicId, formatTime, noteTimeFromId };

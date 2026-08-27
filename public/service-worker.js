@@ -33,6 +33,14 @@ function formatTime(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function noteTimeFromId(value, now = Date.now()) {
+  const id = asText(value).trim();
+  if (!/^[a-f\d]{24}$/i.test(id)) return "";
+  const timestamp = Number.parseInt(id.slice(0, 8), 16) * 1000;
+  if (!Number.isFinite(timestamp) || timestamp < Date.UTC(2013, 0, 1) || timestamp > now + 5 * 60 * 1000) return "";
+  return formatTime(timestamp);
+}
+
 function walk(root, visit) {
   const seen = new WeakSet();
   const queue = [root];
@@ -91,7 +99,7 @@ function noteFromNode(node, sourceUrl) {
     likes: parseMetric(interaction.liked_count || interaction.likedCount || interaction.likes || card.liked_count),
     type: rawType.includes("video") ? "视频" : "笔记",
     time: formatTime(card.time || card.create_time || card.createTime || card.publish_time || card.publishTime
-      || node.time || node.create_time || node.createTime || node.publish_time || node.publishTime),
+      || node.time || node.create_time || node.createTime || node.publish_time || node.publishTime) || noteTimeFromId(id),
     source: source.label,
   };
 }
@@ -127,7 +135,10 @@ async function processCapture(url, json) {
   const stored = await chrome.storage.local.get(["collectorNotes", "collectorComments", "captureStats"]);
   const merge = (oldRows, newRows, max) => Array.from(new Map([...(oldRows || []), ...newRows].map((row) => [row.id, row])).values()).slice(-max);
   const mergeNotes = (oldRows, newRows, max) => {
-    const rows = new Map((oldRows || []).map((note) => [note.id, note]));
+    const rows = new Map((oldRows || []).map((note) => {
+      const time = note.time || noteTimeFromId(note.id);
+      return [note.id, time && time !== note.time ? { ...note, time } : note];
+    }));
     for (const note of newRows) {
       const existing = rows.get(note.id);
       rows.set(note.id, existing ? { ...existing, ...note, time: note.time || existing.time || "" } : note);

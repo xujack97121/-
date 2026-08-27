@@ -28,9 +28,20 @@ const accounts = Object.freeze({
   onStatus: (callback) => subscribe("account:status", callback),
 });
 
+const ai = Object.freeze({
+  getSettings: () => ipcRenderer.invoke("ai:get-settings"),
+  saveSettings: (settings = {}) => ipcRenderer.invoke("ai:save-settings", settings),
+  testConnection: () => ipcRenderer.invoke("ai:test-connection"),
+  listModels: () => ipcRenderer.invoke("ai:list-models"),
+  analyze: (request) => ipcRenderer.invoke("ai:analyze", request),
+  cancel: (requestId) => ipcRenderer.invoke("ai:cancel", { requestId }),
+  onProgress: (callback) => subscribe("ai:progress", callback),
+});
+
 contextBridge.exposeInMainWorld("collectorDesktop", {
   isDesktop: true,
   accounts,
+  ai,
   listAccounts: accounts.list,
   addAccount: accounts.add,
   createAccount: accounts.add,

@@ -1,6 +1,6 @@
 {
   "name": "xiaohongshu-multi-account-collector",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "支持多账号隔离登录的小红书公开数据采集与笔记操作工作台",
   "author": "xujack",
   "private": true,
@@ -11,10 +11,11 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "desktop": "npm run build && electron .",
-    "desktop:check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/account-registry.cjs && node --check electron/app-icon.cjs && node --check electron/normalizer.cjs && node --check electron/comment-dom-capture.cjs",
-    "package:mac": "npm run check && electron-builder --mac dmg --universal",
+    "desktop:check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/ai-service.cjs && node --check electron/renderer-url.cjs && node --check electron/account-registry.cjs && node --check electron/app-icon.cjs && node --check electron/normalizer.cjs && node --check electron/comment-dom-capture.cjs && node --check electron/capture-lifecycle.cjs",
+    "package:win": "npm run build && npm run desktop:check && electron-builder --win nsis --x64 --publish never",
+    "package:mac": "npm run build && npm run desktop:check && electron-builder --mac dmg --arm64 --publish never",
     "check": "npm run build && npm run desktop:check && npm test",
-    "test": "node tests/service-worker.test.mjs && node tests/desktop-normalizer.test.cjs && node tests/account-registry.test.cjs && node tests/preload-account-routing.test.cjs && node tests/app-icon.test.cjs && node tests/comment-randomizer.test.mjs && node tests/comment-time-filter.test.mjs && node tests/note-time-filter.test.mjs && node tests/operation-interval.test.mjs && node tests/operation-status.test.mjs"
+    "test": "node tests/analytics.test.mjs && node tests/ai-analysis.test.mjs && node tests/ai-service.test.cjs && node tests/preload-ai-routing.test.cjs && node tests/renderer-url.test.cjs && node tests/service-worker.test.mjs && node tests/desktop-normalizer.test.cjs && node tests/capture-lifecycle.test.cjs && node tests/account-registry.test.cjs && node tests/preload-account-routing.test.cjs && node tests/app-icon.test.cjs && node tests/comment-randomizer.test.mjs && node tests/comment-time-filter.test.mjs && node tests/note-time-filter.test.mjs && node tests/operation-interval.test.mjs && node tests/operation-status.test.mjs"
   },
   "devDependencies": {
     "@tabler/icons-react": "^3.46.0",
@@ -44,6 +45,18 @@
         "to": "ai-collector-icon.png"
       }
     ],
+    "win": {
+      "icon": "public/assets/ai-collector-icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "public/assets/ai-collector-icon.icns",
@@ -54,7 +67,7 @@
         {
           "target": "dmg",
           "arch": [
-            "universal"
+            "arm64"
           ]
         }
       ]

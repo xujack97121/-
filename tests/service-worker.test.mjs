@@ -43,6 +43,14 @@ await deliver("https://www.xiaohongshu.com/api/sns/web/v1/search/notes", {
         user: { nickname: "示例作者", user_id: "123456789012" },
         interact_info: { liked_count: "1.2万" },
       },
+    }, {
+      id: "6a47919900000000160277c9",
+      note_card: {
+        display_title: "缺少发布时间的搜索结果",
+        type: "normal",
+        user: { nickname: "示例作者" },
+        interact_info: { liked_count: "101" },
+      },
     }],
   },
 });
@@ -59,12 +67,13 @@ await deliver("https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=n
   },
 });
 
-assert.equal(state.collectorNotes.length, 1);
+assert.equal(state.collectorNotes.length, 2);
 assert.equal(state.collectorNotes[0].likes, 12000);
 assert.equal(state.collectorNotes[0].type, "视频");
 assert.equal(state.collectorNotes[0].authorId, "1234••••012");
 assert.equal(state.collectorNotes[0].time, "2026-08-03 10:30");
 assert.equal(state.collectorNotes[0].link, "https://www.xiaohongshu.com/explore/69abcdef0000000012345678?xsec_token=token-public%3D&xsec_source=pc_search&source=web_search_result_notes");
+assert.match(state.collectorNotes[1].time, /^2026-07-03 \d{2}:40$/);
 assert.equal(state.collectorComments.length, 1);
 assert.equal(state.collectorComments[0].region, "上海");
 assert.equal(state.collectorComments[0].authorId, "9876••••000");

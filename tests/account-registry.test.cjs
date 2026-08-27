@@ -80,7 +80,7 @@ async function main() {
     assert.equal(persisted.activeAccountId, ACCOUNT_B);
     assert.deepEqual(persisted.accounts.map((account) => account.id), [ACCOUNT_A, ACCOUNT_B]);
     assert.equal(persisted.accounts.some((account) => Object.hasOwn(account, "partition")), false);
-    assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);
 
     const restored = new AccountRegistry({ filePath, now: () => 9999 });
     await restored.load();

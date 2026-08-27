@@ -1,5 +1,10 @@
 const assert = require("node:assert/strict");
-const { normalizeCapture, normalizeDomComments } = require("../electron/normalizer.cjs");
+const { normalizeCapture, normalizeDomComments, noteTimeFromId, parseMetric } = require("../electron/normalizer.cjs");
+
+assert.equal(parseMetric(undefined), null, "缺失指标不能伪装成零观测");
+assert.equal(parseMetric(""), null, "空指标不能伪装成零观测");
+assert.equal(parseMetric("无法获取"), null, "无法解析的指标应保留为缺失");
+assert.equal(parseMetric(0), 0, "真实零值仍应作为有效观测保留");
 
 const noteResult = normalizeCapture("https://edith.xiaohongshu.com/api/sns/web/v1/search/notes", {
   data: { items: [{ id: "69abcdef0000000012345678", xsec_token: "token-real=", note_card: { display_title: "真实返回标题", type: "video", time: "2026-08-03 10:30", user: { nickname: "作者", user_id: "123456789012" }, interact_info: { liked_count: "2.5万" } } }] },
@@ -9,6 +14,22 @@ assert.equal(noteResult.notes[0].likes, 25000);
 assert.equal(noteResult.notes[0].authorId, "1234••••012");
 assert.equal(noteResult.notes[0].time, "2026-08-03 10:30");
 assert.equal(noteResult.notes[0].link, "https://www.xiaohongshu.com/explore/69abcdef0000000012345678?xsec_token=token-real%3D&xsec_source=pc_search&source=web_search_result_notes");
+
+const missingLikesResult = normalizeCapture("https://edith.xiaohongshu.com/api/sns/web/v1/search/notes", {
+  data: { items: [
+    { id: "69abcdef0000000012345679", note_card: { display_title: "点赞缺失", user: { nickname: "作者" }, interact_info: {} } },
+    { id: "69abcdef0000000012345680", note_card: { display_title: "真实零点赞", user: { nickname: "作者" }, interact_info: { liked_count: 0 } } },
+  ] },
+});
+assert.equal(missingLikesResult.notes[0].likes, null);
+assert.equal(missingLikesResult.notes[1].likes, 0);
+
+const inferredTimeId = "6a47919900000000160277c9";
+const inferredTimeResult = normalizeCapture("https://edith.xiaohongshu.com/api/sns/web/v1/search/notes", {
+  data: { items: [{ id: inferredTimeId, note_card: { display_title: "缺少发布时间的搜索结果", type: "normal", user: { nickname: "作者" }, interact_info: { liked_count: "101" } } }] },
+});
+assert.equal(inferredTimeResult.notes[0].time, noteTimeFromId(inferredTimeId));
+assert.notEqual(inferredTimeResult.notes[0].time, "");
 
 const commentResult = normalizeCapture("https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=note-real-1", {
   data: { comments: [{ id: "comment-real-1", content: "真实返回评论", create_time: 1785200000, ip_location: "IP属地：上海", user: { nickname: "用户", user_id: "987654321000" } }] },

@@ -1,10 +1,19 @@
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
-const { app, BrowserWindow, WebContentsView, ipcMain, shell, session } = require("electron");
+const { pathToFileURL } = require("node:url");
+const { app, BrowserWindow, WebContentsView, ipcMain, net, safeStorage, shell, session } = require("electron");
 const { COMMENT_DOM_CAPTURE_SCRIPT, COMMENT_REPLY_EXPAND_SCRIPT } = require("./comment-dom-capture.cjs");
+const {
+  discardPendingResponsesForRun,
+  isActiveCaptureRun,
+  normalizeCaptureTarget,
+  selectUniqueRowsWithinTarget,
+} = require("./capture-lifecycle.cjs");
 const { normalizeCapture, normalizeDomComments } = require("./normalizer.cjs");
 const { AccountRegistry } = require("./account-registry.cjs");
 const { resolveAppIconPath, setDockIconSafely } = require("./app-icon.cjs");
+const { AiService } = require("./ai-service.cjs");
+const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./renderer-url.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
 const HOME_URL = "https://www.xiaohongshu.com/";
@@ -19,6 +28,8 @@ app.setName("小红书多账号采集工作台");
 
 let mainWindow;
 let accountRegistry;
+let aiService;
+let mainRendererUrl = "";
 let activeAccountId = "";
 let browserBounds = { x: 0, y: 0, width: 1, height: 1 };
 let closingWindow = false;
@@ -326,6 +337,7 @@ function publicAccount(context) {
     profileUrl: context.identity.profileUrl,
     capture: {
       active: context.capture.active,
+      runId: context.capture.runId,
       kind: context.capture.kind,
       collected: captureCount(context),
       target: context.capture.target,
@@ -348,7 +360,7 @@ function listPublicAccounts() {
       loginState: "unknown",
       profileName: "",
       profileUrl: "",
-      capture: { active: false, kind: "notes", collected: 0, target: 100 },
+      capture: { active: false, runId: "", kind: "notes", collected: 0, target: 100 },
       operationActive: false,
       crashed: false,
     };
@@ -377,6 +389,7 @@ function sendStatus(context, phase, message, extra = {}) {
 
 function stopAutoScroll(context, reason = "已停止") {
   const state = context.capture;
+  const stoppedRunId = state.runId;
   if (state.scrollTimer) clearInterval(state.scrollTimer);
   if (state.startTimer) clearTimeout(state.startTimer);
   state.scrollTimer = undefined;
@@ -385,6 +398,7 @@ function stopAutoScroll(context, reason = "已停止") {
   const wasActive = state.active;
   const collected = captureCount(context);
   const target = state.target;
+  discardPendingResponsesForRun(context.pendingResponses, stoppedRunId);
   state.active = false;
   state.runId = "";
   state.pendingStartRunId = "";
@@ -392,6 +406,7 @@ function stopAutoScroll(context, reason = "已停止") {
     context.view.webContents.setBackgroundThrottling(true);
   }
   if (wasActive) sendStatus(context, "stopped", reason, { collected, target });
+  return { wasActive, runId: stoppedRunId, collected, target };
 }
 
 async function scrollOneStep(context, runId) {
@@ -442,7 +457,7 @@ function startAutoScroll(context, runId) {
 async function startTask(context, task) {
   if (context.operation.active) throw new Error("该账号正在执行笔记操作，请稍后再采集");
   const kind = ["notes", "author", "comments"].includes(task?.kind) ? task.kind : "notes";
-  const target = Math.min(2000, Math.max(1, Number(task?.target) || (kind === "comments" ? 500 : 100)));
+  const target = normalizeCaptureTarget(task?.target, kind === "comments" ? 500 : 100);
   if (!isXhsPage(task?.url)) throw new Error("只允许打开小红书站内页面");
   stopAutoScroll(context);
   const runId = randomUUID();
@@ -457,23 +472,45 @@ async function startTask(context, task) {
   return { ok: true, accountId: context.id, runId, kind, target };
 }
 
-function updateCaptureProgress(context, payload, runId) {
+function publishCapturePayload(context, payload, runId) {
   const state = context.capture;
-  if (!state.active || state.runId !== runId) return;
-  const rows = state.kind === "comments" ? payload.comments : payload.notes;
-  for (const row of rows) {
-    state.seen.add(row.id);
-    if (state.kind === "comments") state.seenComments.add(commentIdentity(row, state.noteId));
+  if (!isActiveCaptureRun(state, runId)) return 0;
+  const commentsMode = state.kind === "comments";
+  const seenKeys = commentsMode ? state.seenComments : state.seen;
+  const selected = selectUniqueRowsWithinTarget({
+    rows: commentsMode ? payload.comments : payload.notes,
+    seenKeys,
+    target: state.target,
+    keyOf: commentsMode ? (row) => commentIdentity(row, state.noteId) : (row) => row?.id,
+  });
+  if (!selected.rows.length) return 0;
+
+  for (const key of selected.keys) seenKeys.add(key);
+  if (commentsMode) {
+    for (const row of selected.rows) {
+      if (row?.id) state.seen.add(row.id);
+    }
   }
-  const collected = captureCount(context);
-  sendStatus(context, "collecting", `已采集 ${collected} / ${state.target}`, { collected, target: state.target });
-  if (collected >= state.target) stopAutoScroll(context, `已达到目标，共采集 ${collected} 条`);
+
+  const boundedPayload = {
+    ...payload,
+    notes: commentsMode ? [] : selected.rows,
+    comments: commentsMode ? selected.rows : [],
+  };
+  sendToRenderer("collector:capture", boundedPayload);
+  sendStatus(context, "collecting", `已采集 ${selected.collected} / ${selected.target}`, {
+    collected: selected.collected,
+    target: selected.target,
+  });
+  if (selected.reachedTarget) stopAutoScroll(context, `已达到目标，共采集 ${selected.collected} 条`);
+  return selected.rows.length;
 }
 
 async function readResponseBody(context, requestId, meta) {
   try {
-    if (context.disposed || context.view.webContents.isDestroyed()) return;
+    if (context.disposed || context.view.webContents.isDestroyed() || !isActiveCaptureRun(context.capture, meta?.runId)) return;
     const result = await context.view.webContents.debugger.sendCommand("Network.getResponseBody", { requestId });
+    if (!isActiveCaptureRun(context.capture, meta?.runId)) return;
     const body = result.base64Encoded ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
     if (!body || Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) return;
     const json = JSON.parse(body);
@@ -494,8 +531,7 @@ async function readResponseBody(context, requestId, meta) {
       capturedAt: Date.now(),
       source: "network-response",
     };
-    sendToRenderer("collector:capture", payload);
-    updateCaptureProgress(context, payload, meta.runId);
+    publishCapturePayload(context, payload, meta.runId);
   } catch {
     // Cached or redirected responses can lose their body before it is read.
   }
@@ -516,9 +552,7 @@ async function harvestVisibleComments(context, runId) {
     });
   if (!comments.length) return 0;
   const payload = { notes: [], comments, accountId: context.id, runId, kind: state.kind, url: pageUrl, pageUrl, capturedAt: Date.now(), source: "rendered-page" };
-  sendToRenderer("collector:capture", payload);
-  updateCaptureProgress(context, payload, runId);
-  return comments.length;
+  return publishCapturePayload(context, payload, runId);
 }
 
 async function attachNetworkCapture(context) {
@@ -531,13 +565,14 @@ async function attachNetworkCapture(context) {
     context.debuggerMessageListener = (_event, method, params) => {
     if (method === "Network.responseReceived" && isCollectableApi(params.response?.url)) {
       const state = context.capture;
+      if (!state.active || !state.runId) return;
       context.pendingResponses.set(params.requestId, {
         url: params.response.url,
         mimeType: params.response.mimeType || "",
         pageUrl: contents.getURL(),
-        runId: state.active ? state.runId : "",
-        kind: state.active ? state.kind : "passive",
-        noteId: state.active ? state.noteId : noteIdFromUrl(contents.getURL()),
+        runId: state.runId,
+        kind: state.kind,
+        noteId: state.noteId,
       });
     }
     if (method === "Network.loadingFinished") {
@@ -792,6 +827,12 @@ function sanitizeBounds(bounds) {
 
 function assertMainRenderer(event) {
   if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error("无效请求");
+  if (!isAllowedRendererNavigation(event.sender.getURL(), [mainRendererUrl])) throw new Error("无效请求来源");
+}
+
+function requireAiService() {
+  if (!aiService) throw new Error("AI 服务尚未初始化");
+  return aiService;
 }
 
 async function createWindow() {
@@ -813,22 +854,50 @@ async function createWindow() {
   });
 
   accountRegistry = new AccountRegistry({ filePath: path.join(app.getPath("userData"), "multi-accounts.json") });
+  if (!aiService) {
+    aiService = new AiService({
+      filePath: path.join(app.getPath("userData"), "ai-settings.json"),
+      safeStorage,
+      fetchImpl: (url, options) => net.fetch(url, options),
+    });
+  }
   await accountRegistry.load();
   await accountRegistry.ensureDefault();
   for (const metadata of accountRegistry.list()) createAccountContext(accountRegistry.get(metadata.id));
   activeAccountId = accountRegistry.activeAccountId || accountRegistry.list()[0]?.id || "";
   await activateAccount(activeAccountId, false);
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL;
-  if (rendererUrl) mainWindow.loadURL(rendererUrl);
-  else mainWindow.loadFile(path.join(PROJECT_ROOT, "dist", "index.html"));
+  const rendererFilePath = path.join(PROJECT_ROOT, "dist", "index.html");
+  const rendererDevUrl = resolveRendererDevUrl(process.env.ELECTRON_RENDERER_URL, { isPackaged: app.isPackaged });
+  mainRendererUrl = rendererDevUrl || pathToFileURL(rendererFilePath).href;
+  const rendererId = mainWindow.webContents.id;
+  const cancelRendererAi = () => aiService?.cancelForSender(rendererId);
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openSafeExternal(url);
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    cancelRendererAi();
+    if (!isAllowedRendererNavigation(url, [mainRendererUrl])) {
+      event.preventDefault();
+      openSafeExternal(url);
+    }
+  });
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) cancelRendererAi();
+  });
+  mainWindow.webContents.on("render-process-gone", cancelRendererAi);
+  mainWindow.webContents.once("destroyed", () => aiService?.cancelForSender(rendererId));
   mainWindow.webContents.on("did-finish-load", publishAccountsChanged);
+  if (rendererDevUrl) mainWindow.loadURL(rendererDevUrl);
+  else mainWindow.loadFile(rendererFilePath);
 
   mainWindow.on("closed", () => {
     closingWindow = true;
     for (const context of Array.from(accountContexts.values())) disposeAccountContext(context).catch(() => {});
     accountContexts.clear();
     activeAccountId = "";
+    mainRendererUrl = "";
     mainWindow = undefined;
   });
 }
@@ -872,6 +941,37 @@ ipcMain.handle("accounts:status", (event, payload) => {
 ipcMain.handle("accounts:refresh-status", async (event, payload) => {
   assertMainRenderer(event);
   return probeAccountIdentity(requireContext(payload?.accountId));
+});
+
+ipcMain.handle("ai:get-settings", (event) => {
+  assertMainRenderer(event);
+  return requireAiService().getSettings();
+});
+ipcMain.handle("ai:save-settings", (event, payload) => {
+  assertMainRenderer(event);
+  return requireAiService().saveSettings(payload);
+});
+ipcMain.handle("ai:test-connection", (event) => {
+  assertMainRenderer(event);
+  return requireAiService().testConnection();
+});
+ipcMain.handle("ai:list-models", (event) => {
+  assertMainRenderer(event);
+  return requireAiService().listModels();
+});
+ipcMain.handle("ai:analyze", (event, payload) => {
+  assertMainRenderer(event);
+  const sender = event.sender;
+  return requireAiService().analyze(payload, {
+    senderId: sender.id,
+    onProgress: (progress) => {
+      if (!sender.isDestroyed()) sender.send("ai:progress", progress);
+    },
+  });
+});
+ipcMain.handle("ai:cancel", (event, payload) => {
+  assertMainRenderer(event);
+  return requireAiService().cancel(payload?.requestId, event.sender.id);
 });
 
 ipcMain.handle("browser:navigate", async (event, payload) => {
@@ -951,4 +1051,5 @@ if (singleInstanceLock) app.whenReady().then(() => {
   app.quit();
 });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow().catch(() => app.quit()); });
+app.on("before-quit", () => aiService?.cancelAll());
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
