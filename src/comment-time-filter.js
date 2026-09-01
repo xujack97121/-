@@ -1,4 +1,34 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
+const NOTE_ID_MIN_TIMESTAMP = Date.UTC(2013, 0, 1);
+const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+
+function formatLocalMinute(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export function noteTimestampFromId(value, now = new Date()) {
+  const id = String(value ?? "").trim();
+  if (!/^[a-f\d]{24}$/i.test(id)) return null;
+  const timestamp = Number.parseInt(id.slice(0, 8), 16) * 1000;
+  const nowTimestamp = new Date(now).getTime();
+  if (!Number.isFinite(timestamp) || timestamp < NOTE_ID_MIN_TIMESTAMP) return null;
+  if (Number.isFinite(nowTimestamp) && timestamp > nowTimestamp + FUTURE_TOLERANCE_MS) return null;
+  return timestamp;
+}
+
+export function inferNoteTimeFromId(value, now = new Date()) {
+  const timestamp = noteTimestampFromId(value, now);
+  return timestamp == null ? "" : formatLocalMinute(timestamp);
+}
+
+export function normalizeNoteTime(note, now = new Date()) {
+  if (!note || typeof note !== "object" || String(note.time ?? "").trim()) return note;
+  const time = inferNoteTimeFromId(note.id, now);
+  return time ? { ...note, time } : note;
+}
 
 function calendarDate(now, year, month, day, hour = 0, minute = 0) {
   const date = new Date(now);
@@ -86,5 +116,6 @@ export function commentMatchesTimeRange(value, range, now = new Date()) {
 }
 
 export function noteMatchesTimeRange(value, range, now = new Date()) {
-  return timeMatchesRange(value, range, now);
+  const time = value && typeof value === "object" ? normalizeNoteTime(value, now)?.time : value;
+  return timeMatchesRange(time, range, now);
 }
