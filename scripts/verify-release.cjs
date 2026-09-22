@@ -1,0 +1,15 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const root = path.join(__dirname, "..");
+const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json")));
+const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json")));
+assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+assert.equal(pkg.version, lock.version);
+assert.equal(pkg.version, lock.packages[""].version);
+assert.ok(pkg.dependencies["electron-updater"]);
+assert.equal(pkg.build.publish.owner, "xujack97121");
+assert.equal(pkg.build.publish.repo, "-");
+assert.equal(pkg.build.nsis.deleteAppDataOnUninstall, false);
+assert.ok(fs.readFileSync(path.join(root, "RELEASE_NOTES.md"), "utf8").includes(`v${pkg.version}`));
+console.log(`Release configuration v${pkg.version}: passed`);

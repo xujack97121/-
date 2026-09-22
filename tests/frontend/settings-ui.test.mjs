@@ -15,7 +15,7 @@ try {
     localStorage.setItem("xhs-collector-workspaces-v2", JSON.stringify({
       "settings-test": { comments: [{ id: "c1", noteId: "test-note", content: "测试评论" }], ui: { activeTab: "comments", muted: true } },
     }));
-    globalThis.qa = { saved: [], bounds: [], muted: [], tests: 0, reads: 0, failSave: false, failLoad: false };
+    globalThis.qa = { saved: [], tested: [], bounds: [], muted: [], tests: 0, reads: 0, failSave: false, failLoad: false, failModels: false, failTest: false };
     globalThis.collectorDesktop = {
       isDesktop: true,
       accounts: { list: async () => ({ accounts, activeAccountId: accounts[0].id }) },
@@ -32,8 +32,8 @@ try {
           delete settings.apiKey;
           return { ...settings };
         },
-        listModels: async () => ({ models: [{ id: "test-new-model", ownedBy: "测试服务" }] }),
-        testConnection: async () => { qa.tests++; return { wireApi: "chat_completions", latencyMs: 10 }; },
+        listModels: async () => { if (qa.failModels) throw new Error("无法获取模型列表：系统代理连接失败"); return { models: [{ id: "test-new-model", ownedBy: "测试服务" }] }; },
+        testConnection: async () => { qa.tests++; qa.tested.push({ ...settings }); if (qa.failTest) throw new Error("服务拒绝连接"); return { wireApi: "chat_completions", latencyMs: 10 }; },
         analyze: async () => { throw new Error("Must not send analysis from settings"); },
         onProgress: () => () => {},
       },
@@ -56,14 +56,38 @@ try {
   const dialog = page.getByRole("dialog", { name: "设置", exact: true });
   await page.getByRole("button", { name: "获取模型列表", exact: true }).click();
   await page.getByRole("radio", { name: /test-new-model/ }).check();
-  assert.equal(await page.getByRole("button", { name: "测试连接", exact: true }).isDisabled(), true);
-  await page.getByRole("button", { name: "保存设置", exact: true }).click();
-  await page.getByText("设置已保存，API Key 已加密保留，关闭或重启后仍会继续使用。", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "保存并测试", exact: true }).isEnabled(), true);
+  await page.getByRole("button", { name: "保存并测试", exact: true }).click();
+  await page.getByText(/连接成功，当前使用/).waitFor();
   assert.equal(await page.evaluate(() => Object.hasOwn(qa.saved[0], "apiKey")), false);
   assert.equal(await page.evaluate(() => qa.saved[0].model), "test-new-model");
+  assert.equal(await page.evaluate(() => qa.tested[0].model), "test-new-model", "Testing must use the newly saved configuration");
   await page.getByRole("button", { name: "测试连接", exact: true }).click();
   await page.getByText(/连接成功，当前使用/).waitFor();
   await page.screenshot({ animations: "disabled", path: fileURLToPath(new URL("settings-ai-desktop.png", output)) });
+  await page.evaluate(() => { qa.failModels = true; });
+  await page.getByRole("button", { name: "获取模型列表", exact: true }).click();
+  await page.locator(".ai-model-catalog-error").waitFor();
+  assert.match(await page.locator(".ai-model-catalog header").textContent(), /未获取/);
+  assert.doesNotMatch(await page.locator(".ai-model-catalog header").textContent(), /0 个/);
+  await page.getByLabel("模型", { exact: true }).fill("custom-relay-model");
+  await page.getByLabel("推理强度").selectOption("xhigh");
+  await page.getByRole("button", { name: "保存并测试", exact: true }).click();
+  await page.getByText(/连接成功，当前使用/).waitFor();
+  assert.equal(await page.evaluate(() => qa.tested.at(-1).model), "custom-relay-model");
+  assert.equal(await page.evaluate(() => qa.tested.at(-1).reasoningEffort), "xhigh");
+  assert.equal(await page.evaluate(() => Object.hasOwn(qa.saved.at(-1), "apiKey")), false);
+  await page.screenshot({ animations: "disabled", path: fileURLToPath(new URL("settings-catalog-failure.png", output)) });
+  await page.evaluate(() => { qa.failTest = true; });
+  await page.getByLabel("推理强度").selectOption("low");
+  await page.getByRole("button", { name: "保存并测试", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "设置已保存，但连接测试未通过：服务拒绝连接" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "测试连接", exact: true }).isEnabled(), true);
+  await page.evaluate(() => { qa.failTest = false; });
+  await page.getByLabel("模型", { exact: true }).fill("test-new-model");
+  await page.getByLabel("推理强度").selectOption("");
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await page.getByText("设置已保存，API Key 已加密保留，关闭或重启后仍会继续使用。", { exact: true }).waitFor();
   await page.getByRole("tab", { name: "通用", exact: true }).click();
   await page.getByRole("switch", { name: "网页静音", exact: true }).uncheck();
   assert.deepEqual(await page.evaluate(() => qa.muted.at(-1)), ["settings-test", false]);
@@ -100,15 +124,22 @@ try {
   assert.equal(await page.evaluate(() => qa.saved.at(-1).apiKey), "test-replacement-key");
   assert.ok(!(await dialog.textContent()).includes("test-replacement-key"));
   await page.evaluate(() => { qa.failSave = true; });
+  const testsBeforeFailedSave = await page.evaluate(() => qa.tests);
   await page.getByLabel("模型", { exact: true }).fill("bad-save-model");
-  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await page.getByRole("button", { name: "保存并测试", exact: true }).click();
   await page.getByRole("alert").filter({ hasText: "保存失败" }).waitFor();
+  assert.equal(await page.evaluate(() => qa.tests), testsBeforeFailedSave, "A failed save must not test stale settings");
   assert.equal(await page.getByLabel("模型", { exact: true }).inputValue(), "bad-save-model");
   await page.getByLabel("模型", { exact: true }).fill("test-new-model");
   for (const width of [980, 390]) {
     await page.setViewportSize({ width, height: 844 });
     const bounds = await dialog.boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1);
+    await page.locator("#settings-panel-ai").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    for (const control of [page.getByRole("button", { name: "关闭设置", exact: true }), page.getByRole("button", { name: "保存设置", exact: true }), page.getByRole("button", { name: "测试连接", exact: true })]) {
+      const box = await control.boundingBox();
+      assert.ok(box.y >= bounds.y && box.y + box.height <= bounds.y + bounds.height, "Header and action buttons must stay inside the dialog");
+    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.screenshot({ animations: "disabled", path: fileURLToPath(new URL(`settings-${width}.png`, output)) });
   }
@@ -121,6 +152,9 @@ try {
   await page.getByRole("button", { name: "关闭设置", exact: true }).click();
   await page.evaluate(() => { qa.failLoad = false; qa.failSave = false; });
   await open();
+  await page.getByLabel("服务地址 / 中转地址", { exact: false }).fill("https://another-relay.example.test/v1");
+  assert.equal(await page.getByRole("button", { name: "保存并测试", exact: true }).isDisabled(), true, "Changing providers must not send the old key");
+  await page.getByLabel("服务地址 / 中转地址", { exact: false }).fill("https://ai.example.test/v1");
   await page.getByRole("checkbox", { name: "保存设置时清除已保存的 API Key", exact: true }).check();
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await page.getByText("设置已保存，API Key 已清除。", { exact: true }).waitFor();
@@ -130,7 +164,8 @@ try {
   assert.equal(await page.locator(".comment-details").isVisible(), true);
   assert.equal(await page.locator(".analysis-route").count(), 0, "AI configuration must not navigate to full analytics");
   await page.getByLabel("API Key", { exact: true }).fill("restored-test-key");
-  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await page.getByRole("button", { name: "保存并测试", exact: true }).click();
+  await page.getByText(/连接成功，当前使用/).waitFor();
   await page.getByLabel("已安全保存的 API Key", { exact: true }).waitFor();
   await page.getByRole("button", { name: "关闭设置", exact: true }).click();
   await page.getByRole("button", { name: "分析评论", exact: true }).waitFor();

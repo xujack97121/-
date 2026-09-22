@@ -1,7 +1,7 @@
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, WebContentsView, ipcMain, net, safeStorage, screen, shell, session } = require("electron");
+const { app, BrowserWindow, WebContentsView, ipcMain, net, safeStorage, screen, shell, session, dialog } = require("electron");
 const { COMMENT_DOM_CAPTURE_SCRIPT, COMMENT_REPLY_EXPAND_SCRIPT } = require("./capture/comment-dom-capture.cjs");
 const {
   discardPendingResponsesForRun,
@@ -14,6 +14,7 @@ const { normalizeCapture, normalizeDomComments } = require("./capture/normalizer
 const { AccountRegistry } = require("./accounts/account-registry.cjs");
 const { resolveAppIconPath, setDockIconSafely } = require("./platform/app-icon.cjs");
 const { AiService } = require("./ai/ai-service.cjs");
+const { AppUpdates } = require("./platform/app-updates.cjs");
 const { expandedDataDashboardBounds, fitWindowBounds } = require("./platform/data-dashboard-window.cjs");
 const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./platform/renderer-url.cjs");
 
@@ -31,6 +32,7 @@ app.setName("小红书多账号采集工作台");
 let mainWindow;
 let accountRegistry;
 let aiService;
+let appUpdates;
 let mainRendererUrl = "";
 let activeAccountId = "";
 let browserBounds = { x: 0, y: 0, width: 1, height: 1 };
@@ -867,6 +869,12 @@ function requireAiService() {
   return aiService;
 }
 
+function assertIdleForUpdate() {
+  if (aiService?.jobs.size || [...accountContexts.values()].some((context) => context.capture.active || context.capture.pendingStartRunId || context.operation.active)) {
+    throw new Error("请先停止采集、自动化任务和 AI 分析，再安装更新。");
+  }
+}
+
 async function createWindow() {
   closingWindow = false;
   mainWindow = new BrowserWindow({
@@ -894,6 +902,37 @@ async function createWindow() {
       safeStorage,
       fetchImpl: (url, options) => net.fetch(url, options),
     });
+  }
+  if (!appUpdates) {
+    appUpdates = new AppUpdates({
+      version: app.getVersion(),
+      isPackaged: app.isPackaged,
+      updater: app.isPackaged && process.platform === "win32" ? require("electron-updater").autoUpdater : undefined,
+      settingsPath: path.join(app.getPath("userData"), "update-settings.json"),
+      fetchImpl: (url, options) => net.fetch(url, options),
+      openRelease: (url) => shell.openExternal(url),
+      onState: (state) => sendToRenderer("updates:state", state),
+      beforeInstall: async () => {
+        assertIdleForUpdate();
+        const result = await dialog.showMessageBox(mainWindow, {
+          type: "question",
+          title: "安装更新",
+          message: "退出软件并安装已下载的新版本？",
+          detail: "账号和本地采集数据将保留，安装完成后重新打开软件。",
+          buttons: ["安装并重启", "暂不安装"],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        if (result.response !== 0) return false;
+        await accountRegistry.writeQueue;
+        assertIdleForUpdate();
+        session.defaultSession.flushStorageData();
+        for (const context of accountContexts.values()) context.session.flushStorageData();
+        return true;
+      },
+    });
+    await appUpdates.initialize();
   }
   await accountRegistry.load();
   await accountRegistry.ensureDefault();
@@ -1010,6 +1049,21 @@ ipcMain.handle("ai:cancel", (event, payload) => {
   return requireAiService().cancel(payload?.requestId, event.sender.id);
 });
 
+for (const [channel, action] of [
+  ["updates:get-state", () => appUpdates.getState()],
+  ["updates:check", () => appUpdates.check()],
+  ["updates:download", () => appUpdates.download()],
+  ["updates:install", () => appUpdates.install()],
+  ["updates:set-preferences", (payload) => appUpdates.setPreferences(payload)],
+  ["updates:open-release", () => appUpdates.openDownloadPage()],
+]) {
+  ipcMain.handle(channel, (event, payload) => {
+    assertMainRenderer(event);
+    if (!appUpdates) throw new Error("更新服务尚未初始化");
+    return action(payload);
+  });
+}
+
 ipcMain.handle("browser:navigate", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
@@ -1091,5 +1145,5 @@ if (singleInstanceLock) app.whenReady().then(() => {
   app.quit();
 });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow().catch(() => app.quit()); });
-app.on("before-quit", () => aiService?.cancelAll());
+app.on("before-quit", () => { aiService?.cancelAll(); appUpdates?.dispose(); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

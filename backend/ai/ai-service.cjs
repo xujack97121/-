@@ -52,6 +52,29 @@ const asText = (value) => value == null ? "" : String(value);
 const unique = (values) => Array.from(new Set(values.filter(Boolean)));
 const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
+function networkFailureHint(error) {
+  // Only expose known transport codes, never raw errors that may contain credentials.
+  const categories = [
+    [["ERR_NAME_NOT_RESOLVED", "ENOTFOUND", "EAI_AGAIN"], "域名解析失败，请检查服务地址或 DNS"],
+    [["ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED", "ERR_NO_SUPPORTED_PROXIES"], "系统代理连接失败，请检查代理设置"],
+    [["ERR_CERT_AUTHORITY_INVALID", "ERR_CERT_DATE_INVALID", "ERR_CERT_COMMON_NAME_INVALID", "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT"], "HTTPS 证书校验失败，请检查系统时间或联系服务商"],
+    [["ERR_CONNECTION_REFUSED", "ECONNREFUSED"], "服务器拒绝连接，请检查服务地址和端口"],
+    [["ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED", "ECONNRESET"], "连接被中断，请检查网络、代理或稍后重试"],
+    [["ERR_CONNECTION_TIMED_OUT", "ERR_TIMED_OUT", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"], "连接超时，请检查网络或系统代理"],
+    [["ERR_INTERNET_DISCONNECTED", "ENETUNREACH", "EHOSTUNREACH"], "网络不可达，请检查网络连接"],
+    [["ERR_TOO_MANY_REDIRECTS", "ERR_UNSAFE_REDIRECT"], "接口发生了不安全的跳转，请填写服务商的最终 API 地址"],
+  ];
+  let current = error;
+  for (let depth = 0; current && depth < 5; depth++, current = current.cause) {
+    const tokens = `${current.code || ""} ${current.message || ""}`.match(/\b[A-Z][A-Z0-9_]+\b/g) || [];
+    for (const [codes, hint] of categories) {
+      const code = codes.find((candidate) => tokens.includes(candidate));
+      if (code) return `${hint}（${code}）`;
+    }
+  }
+  return "网络请求未完成，请检查地址、网络或系统代理设置";
+}
+
 function stableId(value) {
   let hash = 2166136261;
   for (const character of asText(value)) {
@@ -427,14 +450,14 @@ function responseContent(rawPayload, wireApi = DEFAULT_WIRE_API) {
     : rawPayload;
   const providerError = compactText(payload?.error?.message || payload?.error, 300);
   if (providerError) throw new AiServiceError("PROVIDER_ERROR", `AI 服务返回错误：${providerError}`);
+  const incompleteReason = compactText(payload?.incomplete_details?.reason, 160);
+  if (payload?.status === "incomplete" || payload?.status === "failed") {
+    throw new AiServiceError("INVALID_RESPONSE", `AI 服务未完成本次响应${incompleteReason ? `：${incompleteReason}` : ""}`);
+  }
   const content = normalizedWireApi === WIRE_API_RESPONSES
     ? responsesResponseContent(payload) || chatResponseContent(payload)
     : chatResponseContent(payload) || responsesResponseContent(payload);
   if (content) return content;
-  const incompleteReason = compactText(payload?.incomplete_details?.reason, 160);
-  if (payload?.status === "incomplete") {
-    throw new AiServiceError("INVALID_RESPONSE", `AI 服务未完成本次响应${incompleteReason ? `：${incompleteReason}` : ""}`);
-  }
   const protocolLabel = normalizedWireApi === WIRE_API_RESPONSES ? "Responses API" : "Chat Completions";
   throw new AiServiceError("INVALID_RESPONSE", `AI 服务响应不是有效的 ${protocolLabel} 格式`);
 }
@@ -553,11 +576,13 @@ function providerStreamError(payload) {
   const message = compactText(
     data?.error?.message
       || data?.response?.error?.message
-      || (typeof data?.error === "string" ? data.error : ""),
+      || (typeof data?.error === "string" ? data.error : "")
+      || (type === "error" ? data?.message : ""),
     300,
   );
   if (message) return message;
-  if (["error", "response.failed", "response.incomplete"].includes(type)) return "AI 服务未完成流式响应";
+  if (["error", "response.failed", "response.incomplete"].includes(type)
+    || ["failed", "incomplete"].includes(data?.response?.status)) return "AI 服务未完成流式响应";
   return "";
 }
 
@@ -580,14 +605,19 @@ function isStreamTransportFailure(error) {
 }
 
 async function readProviderEventStream(response, maxBytes, wireApi, options = {}) {
+  const declaredLength = Number(response?.headers?.get?.("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new AiServiceError("RESPONSE_TOO_LARGE", "AI 服务响应体超过允许大小");
+  }
   let totalBytes = 0;
   let buffer = "";
   let content = "";
   let finalPayload = null;
   let ended = false;
+  let chatCompleted = false;
   const decoder = new TextDecoder();
 
-  const consumeData = (rawData) => {
+  const consumeData = (rawData, eventName) => {
     const data = rawData.trim();
     if (!data || ended) return;
     if (data === "[DONE]") {
@@ -597,23 +627,32 @@ async function readProviderEventStream(response, maxBytes, wireApi, options = {}
     let payload;
     try { payload = JSON.parse(data); }
     catch { throw new AiServiceError("INVALID_RESPONSE", "AI 服务返回了无法解析的流式事件"); }
+    const eventData = isPlainObject(payload?.data) ? payload.data : payload;
+    if (isPlainObject(eventData) && !eventData.type && eventName) eventData.type = eventName;
     const errorMessage = providerStreamError(payload);
     if (errorMessage) throw new AiServiceError("PROVIDER_ERROR", `AI 服务流式响应失败：${errorMessage}`);
+    const finishReason = eventData?.choices?.[0]?.finish_reason;
+    if (["length", "content_filter"].includes(finishReason)) {
+      throw new AiServiceError("INVALID_RESPONSE", "AI 服务未完成流式响应：输出被截断或过滤");
+    }
+    if (finishReason === "stop") chatCompleted = true;
     const delta = providerStreamDelta(payload, wireApi);
     if (delta) {
       content += delta;
       options.onDelta?.(delta);
     }
-    const eventData = isPlainObject(payload?.data) ? payload.data : payload;
     if (isPlainObject(eventData?.response)) finalPayload = eventData.response;
     else if (eventData?.choices?.[0]?.message || eventData?.output || eventData?.output_text) finalPayload = eventData;
+    if (eventData?.type === "response.completed") ended = true;
   };
 
   const consumeBlock = (block) => {
-    const dataLines = block.split(/\r?\n/)
+    const lines = block.split(/\r?\n/);
+    const eventName = lines.findLast((line) => line.startsWith("event:"))?.slice(6).trim();
+    const dataLines = lines
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).replace(/^ /, ""));
-    if (dataLines.length) consumeData(dataLines.join("\n"));
+    if (dataLines.length) consumeData(dataLines.join("\n"), eventName);
   };
 
   const drain = (flush = false) => {
@@ -647,6 +686,7 @@ async function readProviderEventStream(response, maxBytes, wireApi, options = {}
       buffer += decoder.decode();
       drain(true);
     } finally {
+      try { await reader.cancel?.(); } catch { /* preserve the original parse or transport error */ }
       reader.releaseLock?.();
     }
   } else {
@@ -658,6 +698,9 @@ async function readProviderEventStream(response, maxBytes, wireApi, options = {}
     drain(true);
   }
 
+  if (!ended && !chatCompleted) {
+    throw new AiServiceError("INVALID_RESPONSE", "AI 服务流式响应提前结束，未收到完成事件，请重试");
+  }
   if (content) return content;
   if (finalPayload) return responseContent(finalPayload, wireApi);
   throw new AiServiceError("INVALID_RESPONSE", "AI 服务返回了空的流式响应");
@@ -1336,8 +1379,9 @@ class AiService {
           { status: response.status, retryable: [408, 425, 429].includes(Number(response.status)) || response.status >= 500, splittable: response.status === 413 },
         );
       }
-      if (streaming && contentType.includes("text/event-stream")) {
-        const content = await readProviderEventStream(response, this.maxResponseBytes, settings.wireApi, {
+      const readStream = async (streamResponse) => {
+        if (job && !streaming) this._beginStream(job, progressContext);
+        const content = await readProviderEventStream(streamResponse, this.maxResponseBytes, settings.wireApi, {
           onChunk: armTimeout,
           onDelta: (delta) => this._queueStreamDelta(job, delta, progressContext),
         });
@@ -1346,6 +1390,10 @@ class AiService {
         if (attemptController.signal.aborted) throw new AiServiceError("TIMEOUT", "AI 服务请求超时", { retryable: true, attemptTimeout: true });
         if (job) this._progress(job, { ...progressContext, activity: "validating_response", message: progressContext.validatingMessage || "模型结果已接收，正在进行本地来源校验" });
         return content;
+      };
+      // Some relays return SSE even for stream:false (including connection tests).
+      if (contentType.includes("text/event-stream")) {
+        return await readStream(response);
       }
       if (job && streaming) this._progress(job, { ...progressContext, activity: "buffered_response", message: "中转站返回普通 JSON，已自动使用兼容模式接收" });
       const text = await readLimitedText(response, this.maxResponseBytes, { onChunk: armTimeout });
@@ -1354,9 +1402,11 @@ class AiService {
       let payload;
       try { payload = JSON.parse(text); }
       catch {
+        if (/^\s*(?:data:|event:|id:|retry:|:)/.test(text)) {
+          return await readStream({ text: async () => text });
+        }
         const returnedPage = contentType.includes("text/html") || /^\s*</.test(text);
-        const returnedStream = contentType.includes("text/event-stream") || /^\s*data:/.test(text);
-        const responseKind = returnedPage ? "网页而不是 JSON" : returnedStream ? "无法解析的流式数据" : "无法解析的非 JSON 数据";
+        const responseKind = returnedPage ? "网页而不是 JSON" : "无法解析的非 JSON 数据";
         throw new AiServiceError(
           "INVALID_RESPONSE",
           `AI 服务返回了${responseKind}。请确认接口协议选择为 ${wireApiLabel(settings.wireApi)}，并核对中转站 API 地址。请求地址：${endpoint}`,
@@ -1365,6 +1415,7 @@ class AiService {
       if (job) this._progress(job, { ...progressContext, activity: "validating_response", message: progressContext.validatingMessage || "模型结果已接收，正在进行本地来源校验" });
       return responseContent(payload, settings.wireApi);
     } catch (error) {
+      if (error instanceof AiServiceError && apiKey) error.message = error.message.replaceAll(apiKey, "[REDACTED]");
       if (controller.signal.aborted) throw this._jobAbortError(job);
       if (timedOut) {
         throw new AiServiceError(
@@ -1401,7 +1452,7 @@ class AiService {
       }
       const normalizedError = error instanceof AiServiceError
         ? error
-        : new AiServiceError("NETWORK_ERROR", "无法连接 AI 服务，请检查地址和网络", { retryable: true, cause: error });
+        : new AiServiceError("NETWORK_ERROR", `无法连接 AI 服务：${networkFailureHint(error)}`, { retryable: true, cause: error });
       const transportFailure = isStreamTransportFailure(normalizedError);
       const canRetry = Boolean(job)
         && retryAttempt < this.maxTransportRetries
@@ -1563,7 +1614,7 @@ class AiService {
     } catch (error) {
       if (error instanceof AiServiceError) throw error;
       if (controller.signal.aborted || timedOut) throw new AiServiceError("TIMEOUT", "获取模型列表超时");
-      throw new AiServiceError("NETWORK_ERROR", "无法连接模型列表接口，请检查中转地址和网络", { retryable: true, cause: error });
+      throw new AiServiceError("NETWORK_ERROR", `无法获取模型列表：${networkFailureHint(error)}`, { retryable: true, cause: error });
     } finally {
       clearTimeout(timeout);
     }

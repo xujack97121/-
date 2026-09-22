@@ -43,6 +43,17 @@ async function expectInvoke(run, channel, payload) {
 
 async function main() {
   assert.ok(exposedApi);
+  assert.equal(Object.isFrozen(exposedApi.updates), true);
+  for (const [method, channel] of [["getState", "get-state"], ["check", "check"], ["download", "download"], ["install", "install"], ["openRelease", "open-release"]]) {
+    await expectInvoke(() => exposedApi.updates[method]("https://untrusted.test"), `updates:${channel}`, undefined);
+  }
+  await expectInvoke(() => exposedApi.updates.setPreferences({ autoCheck: false, feed: "https://untrusted.test" }), "updates:set-preferences", { autoCheck: false });
+  let update;
+  const stopUpdates = exposedApi.updates.onState((state) => { update = state; });
+  listeners.get("updates:state")({}, { status: "downloaded" });
+  assert.equal(update.status, "downloaded");
+  stopUpdates();
+  assert.equal(removedListeners.at(-1).channel, "updates:state");
   assert.equal(Object.isFrozen(exposedApi.ai), true);
   await expectInvoke(() => exposedApi.ai.getSettings(), "ai:get-settings", undefined);
   await expectInvoke(

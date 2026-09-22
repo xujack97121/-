@@ -30,6 +30,7 @@ import { randomizeOperationInterval } from "../features/operations/operation-int
 import { actionResultLabel, isActionComplete, taskTimingLabel } from "../features/operations/operation-status.js";
 import { AnalyticsPage } from "../features/analytics/AnalyticsPage.jsx";
 import { SettingsDialog } from "../features/settings/SettingsDialog.jsx";
+import { useAppUpdates } from "../features/settings/AppUpdates.jsx";
 import { DataDashboard } from "../features/dashboard/DataDashboard.jsx";
 
 const demoNotes = [
@@ -1415,6 +1416,7 @@ export function App() {
   const [analysisMounted, setAnalysisMounted] = useState(false);
   const [settingsTab, setSettingsTab] = useState(null);
   const [settingsRevision, setSettingsRevision] = useState(0);
+  const updates = useAppUpdates();
   const [runtimeStatuses, setRuntimeStatuses] = useState({});
   const [commentStartingByAccount, setCommentStartingByAccount] = useState({});
   const commentStartLocks = useRef(new Set());
@@ -1827,7 +1829,7 @@ export function App() {
   return (
     <main className={`app-shell ${analysisOpen ? "analysis-view" : ""} ${dashboardOpen ? "dashboard-open" : ""}`}>
       <header className="titlebar">
-        <div className="brand-lockup" title={`小红书多账号采集工作台 v${__APP_VERSION__}`}><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/ai-collector-icon.png`} alt="AI 采集" /><strong>小红书采集工作台</strong><span className="app-version" aria-label={`软件版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span></div>
+        <div className="brand-lockup" title={`小红书多账号采集工作台 v${__APP_VERSION__}`}><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/ai-collector-icon.png`} alt="AI 采集" /><strong>小红书采集工作台</strong><span className="app-version" aria-label={`软件版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>{["available", "downloading", "downloaded"].includes(updates.state.status) && <button className="icon-button app-update-notice" type="button" title={updates.state.status === "downloaded" ? "更新已下载" : "发现新版本"} aria-label="查看软件更新" onClick={() => setSettingsTab("general")}><IconDownload size={15} /></button>}</div>
         <AccountBar
           accounts={accounts}
           activeAccountId={activeAccountId}
@@ -1887,7 +1889,7 @@ export function App() {
           onOpenFullAnalysis={openAccountAnalysis}
         />
       )}
-      {settingsTab && <SettingsDialog initialTab={settingsTab} accountName={accountName} muted={muted} onMuted={setMuted} onClose={() => setSettingsTab(null)} onSaved={() => setSettingsRevision((value) => value + 1)} />}
+      {settingsTab && <SettingsDialog updates={updates} initialTab={settingsTab} accountName={accountName} muted={muted} onMuted={setMuted} onClose={() => setSettingsTab(null)} onSaved={() => setSettingsRevision((value) => value + 1)} />}
       {toast && <div className={`toast ${toast.type}`}>{toast.message}</div>}
       {accountDialog && <AccountDialog key={`${accountDialog.mode}-${accountDialog.account?.id ?? "new"}`} dialog={accountDialog} busy={accountBusy} onCancel={() => !accountBusy && setAccountDialog(null)} onSubmit={submitAccountDialog} />}
     </main>

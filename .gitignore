@@ -27,6 +27,8 @@ multi-accounts.json
 ai-settings.json
 ai-settings.json*.tmp
 multi-accounts.json*.tmp
+update-settings.json
+update-settings.json.tmp
 *.log
 *.dmp
 *.dmg

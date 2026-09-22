@@ -489,6 +489,33 @@ async function main() {
     return true;
   });
 
+  for (const [code, hint] of [
+    ["ERR_NAME_NOT_RESOLVED", "域名解析失败"],
+    ["ERR_PROXY_CONNECTION_FAILED", "系统代理连接失败"],
+    ["ERR_CERT_AUTHORITY_INVALID", "HTTPS 证书校验失败"],
+    ["ECONNREFUSED", "服务器拒绝连接"],
+    ["ECONNRESET", "连接被中断"],
+    ["ETIMEDOUT", "连接超时"],
+    ["ENETUNREACH", "网络不可达"],
+    ["ERR_UNSAFE_REDIRECT", "不安全的跳转"],
+    ["UNKNOWN_NETWORK_ERROR", "网络请求未完成"],
+  ]) {
+    modelListService.fetchImpl = async () => {
+      throw new Error("fetch failed model-list-secret", { cause: new Error(`net::${code} model-list-secret`) });
+    };
+    for (const request of [() => modelListService.listModels(), () => modelListService.testConnection()]) {
+      await assert.rejects(request(), (error) => {
+        assert.equal(error.code, "NETWORK_ERROR");
+        assert.ok(error.message.includes(hint), error.message);
+        assert.equal(error.message.includes("model-list-secret"), false);
+        return true;
+      });
+    }
+  }
+  // Catalog availability must not gate a manually configured model.
+  modelListService.fetchImpl = async () => rawResponse(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }] }), { contentType: "application/json" });
+  assert.equal((await modelListService.testConnection()).ok, true);
+
   const htmlService = new AiService({
     filePath: path.join(directory, "html-settings.json"),
     safeStorage,
@@ -1200,7 +1227,9 @@ async function main() {
   console.log("AI service settings, batching, traceability, cancellation and timeout: passed");
 }
 
+// Mock fetches hold no sockets; keep timeout tests alive until their assertions finish.
+const testKeepAlive = setInterval(() => {}, 1000);
 main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
-});
+}).finally(() => clearInterval(testKeepAlive));

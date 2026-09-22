@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { IconAlertCircle, IconCircleCheck, IconLoader2, IconRefresh, IconSearch, IconSettings, IconShieldLock, IconTestPipe, IconTrash, IconX } from "@tabler/icons-react";
 import "../analytics/analytics.css";
 import "./settings.css";
+import { AppUpdatesSettings } from "./AppUpdates.jsx";
 const formatNumber = (value) => new Intl.NumberFormat("zh-CN").format(Number(value));
 function aiSettingsConfigured(settings) {
   return Boolean(settings?.baseUrl && settings?.model && (settings?.hasApiKey || settings?.apiKeyRequired === false));
@@ -57,7 +58,7 @@ function aiEndpointPreview(baseUrl, wireApi) {
   }
 }
 
-function AiSettingsModal({ settings, draft, setDraft, busy, result, error, modelCatalog, modelQuery, setModelQuery, onClose, onSave, onTest, onLoadModels, initialTab, accountName, muted, onMuted, available, loading, loadFailed }) {
+function AiSettingsModal({ settings, draft, setDraft, busy, result, error, modelCatalog, modelQuery, setModelQuery, onClose, onSave, onTest, onLoadModels, initialTab, accountName, muted, onMuted, available, loading, loadFailed, updates }) {
   const [tab, setTab] = useState(initialTab);
   const dialogRef = useRef(null);
   const closeRef = useRef(null);
@@ -77,6 +78,9 @@ function AiSettingsModal({ settings, draft, setDraft, busy, result, error, model
   const savedProviderOrigin = providerOriginOf(settings?.baseUrl);
   const draftProviderOrigin = providerOriginOf(draft.baseUrl);
   const endpointOriginChanged = Boolean(settings?.hasApiKey && savedProviderOrigin && draftProviderOrigin && savedProviderOrigin !== draftProviderOrigin);
+  const canTestDraft = Boolean(draft.baseUrl.trim() && draft.model.trim()
+    && !draft.clearApiKey
+    && (draft.apiKey.trim() || (settings?.hasApiKey && !endpointOriginChanged) || (settings?.apiKeyRequired === false && !endpointOriginChanged)));
   let keyStatusKind = "empty";
   let keyStatusText = settings?.apiKeyRequired === false ? "未配置（可选）" : "未配置";
   if (draft.clearApiKey) {
@@ -158,6 +162,7 @@ function AiSettingsModal({ settings, draft, setDraft, busy, result, error, model
         </div>
         <div id="settings-panel-general" role="tabpanel" aria-labelledby="settings-tab-general" hidden={tab !== "general"} className="settings-general">
           <div className="settings-row"><div><strong>网页静音</strong><small>{accountName || "当前账号"}</small></div><input aria-label="网页静音" type="checkbox" role="switch" checked={muted} onChange={(event) => onMuted(event.target.checked)} /></div>
+          <AppUpdatesSettings updates={updates} />
         </div>
         <div id="settings-panel-ai" role="tabpanel" aria-labelledby="settings-tab-ai" hidden={tab !== "ai"}>
         {!available && <p className="settings-unavailable" role="status">AI 服务配置仅在桌面版可用。</p>}
@@ -191,7 +196,7 @@ function AiSettingsModal({ settings, draft, setDraft, busy, result, error, model
           {(modelCatalog?.busy || modelCatalog?.loaded || modelCatalog?.error) && (
             <section className="ai-model-catalog" aria-label="中转站模型列表" aria-live="polite">
               <header>
-                <div><strong>可用模型</strong><span>{modelCatalog?.busy ? "读取中" : `${formatNumber(availableModels.length, "0")} 个`}</span></div>
+                <div><strong>可用模型</strong><span>{modelCatalog?.busy ? "读取中" : modelCatalog?.error ? "未获取" : `${formatNumber(availableModels.length, "0")} 个`}</span></div>
                 {availableModels.length > 6 && (
                   <label className="ai-model-search" aria-label="搜索模型">
                     <IconSearch size={14} />
@@ -199,7 +204,7 @@ function AiSettingsModal({ settings, draft, setDraft, busy, result, error, model
                   </label>
                 )}
               </header>
-              {modelCatalog?.error && <div className="ai-model-catalog-error"><IconAlertCircle size={14} />{modelCatalog.error}</div>}
+              {modelCatalog?.error && <div className="ai-model-catalog-error"><IconAlertCircle size={14} /><div>{modelCatalog.error}<small className="ai-model-catalog-hint">模型列表不可用不代表 API 不可用；已填写的模型仍可保存并测试。</small></div></div>}
               {modelCatalog?.busy && !availableModels.length && <div className="ai-model-catalog-empty"><IconLoader2 className="spin" size={15} />正在读取中转站模型列表…</div>}
               {!modelCatalog?.busy && modelCatalog?.loaded && !modelCatalog?.error && !availableModels.length && <div className="ai-model-catalog-empty">中转站没有返回可选模型，可继续手动填写。</div>}
               {!modelCatalog?.error && availableModels.length > 0 && (
@@ -293,14 +298,16 @@ function AiSettingsModal({ settings, draft, setDraft, busy, result, error, model
             <p><strong>发送范围与作用边界</strong>运行分析时会向所配置服务商发送笔记标题和评论正文。账号 ID、用户 ID、昵称、原始链接和本地 evidenceRef 不会发送；{draft.wireApi === "responses" ? "Responses API 请求固定携带 store = false。" : "Chat Completions 没有统一的关闭存储参数，服务端留存策略以中转站为准。"}AI 结果只进入辅助洞察区，不会回写基础统计与图表。</p>
           </div>
           {settings?.encryptionAvailable === false && <div className="ai-settings-warning"><IconAlertCircle size={15} />当前系统无法使用安全密钥存储，桌面端不会明文保存 API Key。</div>}
-          {error && <div className="ai-settings-error" role="alert"><IconAlertCircle size={15} />{error}</div>}
-          {result && <div className="ai-settings-success" role="status"><IconCircleCheck size={15} />{result}</div>}
         </fieldset>
         </div>
+        {tab === "ai" && (error || result) && <div className="settings-feedback">
+          {error && <div className="ai-settings-error" role="alert"><IconAlertCircle size={15} />{error}</div>}
+          {result && <div className="ai-settings-success" role="status"><IconCircleCheck size={15} />{result}</div>}
+        </div>}
         {tab === "ai" && <footer>
           <span>{dirty ? "有尚未保存的修改" : configured ? "配置已保存" : "等待完整配置"}</span>
-          <button className="button" type="button" onClick={onTest} disabled={!available || loadFailed || loading || modalBusy || dirty || !configured} title={dirty ? "请先保存当前修改" : "测试已保存的配置"}>
-            {busy === "test" ? <IconLoader2 className="spin" size={15} /> : <IconTestPipe size={15} />}测试连接
+          <button className="button" type="button" onClick={() => onTest(dirty)} disabled={!available || loadFailed || loading || modalBusy || !canTestDraft} title={dirty ? "保存当前修改后测试连接" : "测试已保存的配置"}>
+            {busy === "test" ? <IconLoader2 className="spin" size={15} /> : <IconTestPipe size={15} />}{busy === "test" ? "正在测试" : dirty ? "保存并测试" : "测试连接"}
           </button>
           <button className="button primary" type="button" onClick={onSave} disabled={!available || loadFailed || loading || modalBusy || !draft.baseUrl.trim() || !draft.model.trim()}>
             {busy === "save" ? <IconLoader2 className="spin" size={15} /> : <IconCircleCheck size={15} />}保存设置
@@ -312,7 +319,7 @@ function AiSettingsModal({ settings, draft, setDraft, busy, result, error, model
 }
 
 
-export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, initialTab = "ai" }) {
+export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, initialTab = "ai", updates }) {
   const aiApi = globalThis.collectorDesktop?.ai;
   const [aiSettings, setAiSettings] = useState(null);
   const [aiSettingsDraft, setAiSettingsDraft] = useState(() => settingsDraftOf());
@@ -358,47 +365,51 @@ export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, 
       setAiModelCatalog({ ...emptyAiModelCatalog(), loaded: true, error: aiErrorMessage(error, "获取模型列表失败") });
     }
   };
-  const saveAiSettings = async () => {
+  const persistAiSettings = async () => {
     if (!aiApi?.saveSettings) {
-      setAiSettingsError("当前桌面程序暂未提供 AI 设置能力。");
-      return;
+      throw new Error("当前桌面程序暂未提供 AI 设置能力。");
     }
+    const payload = {
+      baseUrl: aiSettingsDraft.baseUrl.trim(),
+      model: aiSettingsDraft.model.trim(),
+      wireApi: aiSettingsDraft.wireApi,
+      reasoningEffort: aiSettingsDraft.reasoningEffort,
+    };
+    if (aiSettingsDraft.clearApiKey) payload.apiKey = "";
+    else if (aiSettingsDraft.apiKey.trim()) payload.apiKey = aiSettingsDraft.apiKey.trim();
+    const catalogSourceChanged = payload.baseUrl !== String(aiSettings?.baseUrl || "").trim()
+      || payload.wireApi !== (aiSettings?.wireApi === "responses" ? "responses" : "chat_completions")
+      || Object.hasOwn(payload, "apiKey");
+    const saved = await aiApi.saveSettings(payload);
+    const originChanged = Boolean(providerOriginOf(payload.baseUrl) && providerOriginOf(aiSettings?.baseUrl) && providerOriginOf(payload.baseUrl) !== providerOriginOf(aiSettings?.baseUrl));
+    const fallbackHasApiKey = Object.hasOwn(payload, "apiKey") ? Boolean(payload.apiKey) : originChanged ? false : Boolean(aiSettings?.hasApiKey);
+    const { apiKey: _apiKey, ...publicPayload } = payload;
+    const nextSettings = saved || { ...aiSettings, ...publicPayload, hasApiKey: fallbackHasApiKey };
+    setAiSettings(nextSettings);
+    setAiSettingsDraft(settingsDraftOf(nextSettings));
+    if (catalogSourceChanged) {
+      setAiModelCatalog(emptyAiModelCatalog());
+      setAiModelQuery("");
+    }
+    if (Object.hasOwn(payload, "apiKey") && !payload.apiKey) setAiSettingsResult("设置已保存，API Key 已清除。");
+    else if (nextSettings.hasApiKey) setAiSettingsResult("设置已保存，API Key 已加密保留，关闭或重启后仍会继续使用。");
+    else setAiSettingsResult("设置已保存，当前未配置 API Key。");
+    onSaved?.();
+    return nextSettings;
+  };
+  const saveAiSettings = async () => {
     setAiSettingsBusy("save");
     setAiSettingsError("");
     setAiSettingsResult("");
     try {
-      const payload = {
-        baseUrl: aiSettingsDraft.baseUrl.trim(),
-        model: aiSettingsDraft.model.trim(),
-        wireApi: aiSettingsDraft.wireApi,
-        reasoningEffort: aiSettingsDraft.reasoningEffort,
-      };
-      if (aiSettingsDraft.clearApiKey) payload.apiKey = "";
-      else if (aiSettingsDraft.apiKey.trim()) payload.apiKey = aiSettingsDraft.apiKey.trim();
-      const catalogSourceChanged = payload.baseUrl !== String(aiSettings?.baseUrl || "").trim()
-        || payload.wireApi !== (aiSettings?.wireApi === "responses" ? "responses" : "chat_completions")
-        || Object.hasOwn(payload, "apiKey");
-      const saved = await aiApi.saveSettings(payload);
-      const originChanged = Boolean(providerOriginOf(payload.baseUrl) && providerOriginOf(aiSettings?.baseUrl) && providerOriginOf(payload.baseUrl) !== providerOriginOf(aiSettings?.baseUrl));
-      const fallbackHasApiKey = Object.hasOwn(payload, "apiKey") ? Boolean(payload.apiKey) : originChanged ? false : Boolean(aiSettings?.hasApiKey);
-      const nextSettings = saved || { ...aiSettings, ...payload, hasApiKey: fallbackHasApiKey };
-      setAiSettings(nextSettings);
-      setAiSettingsDraft(settingsDraftOf(nextSettings));
-      if (catalogSourceChanged) {
-        setAiModelCatalog(emptyAiModelCatalog());
-        setAiModelQuery("");
-      }
-      if (Object.hasOwn(payload, "apiKey") && !payload.apiKey) setAiSettingsResult("设置已保存，API Key 已清除。");
-      else if (nextSettings.hasApiKey) setAiSettingsResult("设置已保存，API Key 已加密保留，关闭或重启后仍会继续使用。");
-      else setAiSettingsResult("设置已保存，当前未配置 API Key。");
-      onSaved?.();
+      await persistAiSettings();
     } catch (error) {
       setAiSettingsError(aiErrorMessage(error, "AI 设置保存失败"));
     } finally {
       setAiSettingsBusy("");
     }
   };
-  const testAiConnection = async () => {
+  const testAiConnection = async (saveFirst = false) => {
     if (!aiApi?.testConnection) {
       setAiSettingsError("当前桌面程序暂未提供连接测试能力。");
       return;
@@ -406,7 +417,14 @@ export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, 
     setAiSettingsBusy("test");
     setAiSettingsError("");
     setAiSettingsResult("");
+    let savedBeforeTest = false;
     try {
+      if (saveFirst) {
+        const saved = await persistAiSettings();
+        savedBeforeTest = true;
+        setAiSettingsResult("");
+        if (!aiSettingsConfigured(saved)) throw new Error("请填写当前服务的 API Key。");
+      }
       const result = await aiApi.testConnection();
       if (result?.recommendedWireApi && result.recommendedWireApi !== aiSettingsDraft.wireApi) {
         const workingProtocol = result.recommendedWireApi === "responses" ? "Responses API" : "Chat Completions";
@@ -418,7 +436,7 @@ export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, 
       const protocol = result?.wireApi === "responses" ? "Responses API" : "Chat Completions";
       setAiSettingsResult(`连接成功，当前使用 ${protocol}${Number.isFinite(Number(result?.latencyMs)) ? `，耗时 ${formatNumber(result.latencyMs)} 毫秒` : ""}。`);
     } catch (error) {
-      setAiSettingsError(aiErrorMessage(error, "连接测试失败"));
+      setAiSettingsError(`${savedBeforeTest ? "设置已保存，但连接测试未通过：" : ""}${aiErrorMessage(error, "连接测试失败")}`);
     } finally {
       setAiSettingsBusy("");
     }
@@ -426,6 +444,7 @@ export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, 
 
   return (
       <AiSettingsModal
+        updates={updates}
         initialTab={initialTab}
         accountName={accountName}
         muted={muted}
@@ -435,7 +454,11 @@ export function SettingsDialog({ onClose, onSaved, accountName, muted, onMuted, 
         loadFailed={loadFailed}
         settings={aiSettings}
         draft={aiSettingsDraft}
-        setDraft={setAiSettingsDraft}
+        setDraft={(update) => {
+          setAiSettingsDraft(update);
+          setAiSettingsError("");
+          setAiSettingsResult("");
+        }}
         busy={aiSettingsBusy}
         result={aiSettingsResult}
         error={aiSettingsError}

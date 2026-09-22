@@ -38,10 +38,21 @@ const ai = Object.freeze({
   onProgress: (callback) => subscribe("ai:progress", callback),
 });
 
+const updates = Object.freeze({
+  getState: () => ipcRenderer.invoke("updates:get-state"),
+  check: () => ipcRenderer.invoke("updates:check"),
+  download: () => ipcRenderer.invoke("updates:download"),
+  install: () => ipcRenderer.invoke("updates:install"),
+  setPreferences: (preferences) => ipcRenderer.invoke("updates:set-preferences", { autoCheck: preferences?.autoCheck }),
+  openRelease: () => ipcRenderer.invoke("updates:open-release"),
+  onState: (callback) => subscribe("updates:state", callback),
+});
+
 contextBridge.exposeInMainWorld("collectorDesktop", {
   isDesktop: true,
   accounts,
   ai,
+  updates,
   listAccounts: accounts.list,
   addAccount: accounts.add,
   createAccount: accounts.add,
