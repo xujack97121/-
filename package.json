@@ -1,21 +1,24 @@
 {
   "name": "xiaohongshu-multi-account-collector",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "支持多账号隔离登录的小红书公开数据采集与笔记操作工作台",
   "author": "xujack",
   "private": true,
   "type": "module",
-  "main": "electron/main.cjs",
+  "main": "backend/main.cjs",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "desktop": "npm run build && electron .",
-    "desktop:check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/ai-service.cjs && node --check electron/renderer-url.cjs && node --check electron/account-registry.cjs && node --check electron/app-icon.cjs && node --check electron/normalizer.cjs && node --check electron/comment-dom-capture.cjs && node --check electron/capture-lifecycle.cjs",
+    "desktop:check": "node --check backend/main.cjs && node --check backend/preload.cjs && node --check backend/ai/ai-service.cjs && node --check backend/platform/renderer-url.cjs && node --check backend/platform/data-dashboard-window.cjs && node --check backend/accounts/account-registry.cjs && node --check backend/platform/app-icon.cjs && node --check backend/capture/normalizer.cjs && node --check backend/capture/comment-dom-capture.cjs && node --check backend/capture/capture-lifecycle.cjs",
     "package:win": "npm run build && npm run desktop:check && electron-builder --win nsis --x64 --publish never",
     "package:mac": "npm run build && npm run desktop:check && electron-builder --mac dmg --arm64 --publish never",
     "check": "npm run build && npm run desktop:check && npm test",
-    "test": "node tests/analytics.test.mjs && node tests/ai-analysis.test.mjs && node tests/ai-service.test.cjs && node tests/preload-ai-routing.test.cjs && node tests/renderer-url.test.cjs && node tests/service-worker.test.mjs && node tests/desktop-normalizer.test.cjs && node tests/capture-lifecycle.test.cjs && node tests/account-registry.test.cjs && node tests/preload-account-routing.test.cjs && node tests/app-icon.test.cjs && node tests/comment-randomizer.test.mjs && node tests/comment-time-filter.test.mjs && node tests/note-time-filter.test.mjs && node tests/operation-interval.test.mjs && node tests/operation-status.test.mjs"
+    "test": "node tests/frontend/analytics.test.mjs && node tests/frontend/ai-analysis.test.mjs && node tests/backend/ai-service.test.cjs && node tests/backend/preload-ai-routing.test.cjs && node tests/backend/renderer-url.test.cjs && node tests/backend/data-dashboard-window.test.cjs && node tests/frontend/service-worker.test.mjs && node tests/backend/desktop-normalizer.test.cjs && node tests/backend/capture-lifecycle.test.cjs && node tests/backend/account-registry.test.cjs && node tests/backend/preload-account-routing.test.cjs && node tests/backend/app-icon.test.cjs && node tests/packaging/installer-config.test.cjs && node tests/frontend/comment-randomizer.test.mjs && node tests/frontend/comment-time-filter.test.mjs && node tests/frontend/note-time-filter.test.mjs && node tests/frontend/operation-interval.test.mjs && node tests/frontend/operation-status.test.mjs && node tests/frontend/comment-notes.test.mjs && node tests/frontend/comment-insights.test.mjs",
+    "test:frontend": "node tests/frontend/analytics.test.mjs && node tests/frontend/ai-analysis.test.mjs && node tests/frontend/service-worker.test.mjs && node tests/frontend/comment-randomizer.test.mjs && node tests/frontend/comment-time-filter.test.mjs && node tests/frontend/note-time-filter.test.mjs && node tests/frontend/operation-interval.test.mjs && node tests/frontend/operation-status.test.mjs && node tests/frontend/comment-notes.test.mjs && node tests/frontend/comment-insights.test.mjs",
+    "test:backend": "node tests/backend/ai-service.test.cjs && node tests/backend/preload-ai-routing.test.cjs && node tests/backend/renderer-url.test.cjs && node tests/backend/data-dashboard-window.test.cjs && node tests/backend/desktop-normalizer.test.cjs && node tests/backend/capture-lifecycle.test.cjs && node tests/backend/account-registry.test.cjs && node tests/backend/preload-account-routing.test.cjs && node tests/backend/app-icon.test.cjs",
+    "test:packaging": "node tests/packaging/installer-config.test.cjs"
   },
   "devDependencies": {
     "@tabler/icons-react": "^3.46.0",
@@ -36,18 +39,18 @@
     },
     "files": [
       "dist/**/*",
-      "electron/**/*",
+      "backend/**/*",
       "package.json"
     ],
     "extraResources": [
       {
-        "from": "public/assets/ai-collector-icon.png",
+        "from": "frontend/public/assets/ai-collector-icon.png",
         "to": "ai-collector-icon.png"
       }
     ],
     "win": {
-      "icon": "public/assets/ai-collector-icon.ico",
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "icon": "frontend/public/assets/ai-collector-icon.ico",
+      "artifactName": "xiaohongshu-multi-account-${version}-${arch}.${ext}",
       "target": [
         {
           "target": "nsis",
@@ -57,12 +60,21 @@
         }
       ]
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh"
+    },
     "mac": {
       "category": "public.app-category.productivity",
-      "icon": "public/assets/ai-collector-icon.icns",
+      "icon": "frontend/public/assets/ai-collector-icon.icns",
       "identity": "-",
       "hardenedRuntime": false,
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "artifactName": "xiaohongshu-multi-account-${version}-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
@@ -74,7 +86,7 @@
     },
     "dmg": {
       "title": "${productName} ${version}",
-      "icon": "public/assets/ai-collector-icon.icns",
+      "icon": "frontend/public/assets/ai-collector-icon.icns",
       "window": {
         "width": 540,
         "height": 380

@@ -2,6 +2,7 @@
 node_modules/
 dist/
 release/
+release-*/
 .npm-cache/
 .vite/
 .cache/
@@ -23,6 +24,8 @@ coverage/
 
 # Runtime data and logs
 multi-accounts.json
+ai-settings.json
+ai-settings.json*.tmp
 multi-accounts.json*.tmp
 *.log
 *.dmp

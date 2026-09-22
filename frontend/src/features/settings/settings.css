@@ -1,0 +1,16 @@
+.app-settings-modal { border-color: var(--line); color: var(--cocoa); }
+.app-settings-modal [hidden] { display: none !important; }
+.app-settings-modal > header { align-items: center; border-color: var(--line-soft); background: var(--cream-100); }
+.app-settings-modal h2 { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--cocoa); }
+.app-settings-modal .ai-settings-body { min-width: 0; margin: 0; border: 0; }
+.app-settings-modal > footer { border-color: var(--line-soft); background: var(--cream-100); }
+.settings-tabs { display: flex; gap: 20px; padding: 0 16px; border-bottom: 1px solid var(--line-soft); }
+.settings-tabs button { min-height: 42px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: inherit; cursor: pointer; }
+.settings-tabs button[aria-selected="true"] { border-bottom-color: var(--coral-deep); color: var(--coral-deep); font-weight: 700; }
+.settings-general { padding: 12px 16px 24px; min-height: 160px; }
+.settings-row { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.settings-row strong, .settings-row small { display: block; }
+.settings-row small { margin-top: 5px; color: var(--muted); }
+.settings-row input { width: 18px; height: 18px; accent-color: var(--coral-deep); }
+.settings-unavailable { margin: 12px 16px; color: var(--muted); }
+.app-settings-modal :is(button, input, select):focus-visible { outline: 2px solid var(--coral-deep); outline-offset: 2px; }

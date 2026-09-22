@@ -39,6 +39,26 @@ npm run desktop
 
 `npm run dev` 启动的本地页面只用于检查布局和交互，浏览器安全边界决定了它不能验证小红书多账号登录隔离。完整验收需在 Electron 桌面窗口中创建至少两个账号，分别登录、切换，并在重启应用后再次确认两个会话仍然独立保留。
 
+## 工程结构
+
+```text
+frontend/                 React/Vite 前端与浏览器扩展静态资源
+  src/app/                应用入口、主界面与全局样式
+  src/features/           按业务域组织的分析、评论和操作模块
+  public/                 构建时复制到 dist 根目录的扩展文件和图片
+backend/                  Electron 主进程、安全预加载和桌面能力
+  accounts/               多账号注册与持久化
+  ai/                     AI 服务与模型调用
+  capture/                页面采集、评论 DOM 解析和数据规范化
+  platform/               图标、渲染地址等平台适配
+tests/                    按 frontend、backend、packaging 分层
+build/                    安装器脚本
+dist/                     前端构建输出，不进入版本控制
+release/                  安装包输出，不进入版本控制
+```
+
+前端不能直接调用 Node.js 或 Electron API，只能通过 `backend/preload.cjs` 暴露的受限 IPC 接口访问桌面能力。详细边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
 ## 使用边界
 
 - 只采集你有权访问和使用的数据，并遵守平台协议、隐私规则和适用法律。
