@@ -44,6 +44,16 @@ assert.equal(result.unknown, 1, "Missing AI output is not neutral");
 assert.equal(result.mixed, 1);
 assert.equal(result.byIndex.get(0).reason, "明确表达认可。");
 assert.equal(result.byIndex.has(4), false);
+const opinion = materializeNoteInsights({ ...raw, publicOpinion: { status: "complete", sections: [
+  { kind: "overall", summary: "认可与顾虑并存，需要区分具体诉求。", sourceIds: [sourceAt(0), sourceAt(1)] },
+  { kind: "concerns", summary: "不应展示的跨范围判断", sourceIds: [sourceAt(0), "other-account"] },
+  { kind: "demands", summary: "不应引用笔记推断用户需求", sourceIds: [analysis.dataset.records.find((row) => row.kind === "note").sourceId] },
+] } }, analysis);
+assert.equal(opinion.report.publicOpinion.sections.length, 1);
+assert.equal(opinion.report.publicOpinion.sections[0].evidenceRefs.length, 2);
+assert.deepEqual(opinion.counts, result.counts);
+assert.equal(materializeNoteInsights(opinion.report, analysis).report.publicOpinion.sections.length, 1, "Cached evidence is revalidated");
+assert.equal(materializeNoteInsights({ ...raw, publicOpinion: { status: "complete", sections: [] } }, analysis).report.publicOpinion.status, "unavailable");
 assert.throws(() => materializeNoteInsights({ schemaVersion: 99 }, analysis));
 assert.notEqual(buildNoteAnalysis("account-B", group).dataset.fingerprint, analysis.dataset.fingerprint);
 assert.notEqual(buildNoteAnalysis("account-A", { ...group, id: "other-note" }).dataset.fingerprint, analysis.dataset.fingerprint);

@@ -288,7 +288,7 @@ async function main() {
     hasApiKey: false,
     apiKeyRequired: true,
     encryptionAvailable: true,
-    promptVersion: "xhs-ai-analysis-2026-08-24-v2",
+    promptVersion: "xhs-ai-analysis-2026-09-24-v3",
   });
   const publicSettings = await service.saveSettings({
     baseUrl: "https://api.example.com/v1/",
@@ -304,7 +304,7 @@ async function main() {
     hasApiKey: true,
     apiKeyRequired: true,
     encryptionAvailable: true,
-    promptVersion: "xhs-ai-analysis-2026-08-24-v2",
+    promptVersion: "xhs-ai-analysis-2026-09-24-v3",
   });
   assert.equal(Object.hasOwn(publicSettings, "apiKey"), false);
   assert.equal(Object.hasOwn(publicSettings, "encryptedApiKey"), false);

@@ -48,6 +48,7 @@ try {
   await noOverflow(demo);
   await demo.getByRole("button", { name: "关闭评论分析" }).press("Escape");
   assert.equal(await demo.locator(".comment-details").count(), 0);
+  await demo.waitForFunction(() => document.querySelector(".comment-card-open") === document.activeElement);
   assert.equal(await demo.locator(".comment-card-open").first().evaluate((element) => element === document.activeElement), true);
   await demo.locator(".comment-card-open").last().click();
   assert.equal(await demo.locator(".comment-metrics dd").first().textContent(), "1");

@@ -43,7 +43,7 @@
 .comment-eyebrow { display: flex; align-items: center; gap: 5px; color: var(--coral-deep); font-size: 12px; }
 .comment-details-heading h2 { margin: 8px 0 5px; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; max-height: 90px; overflow-y: auto; }
 .comment-details-heading p { margin: 0; font-size: 12px; color: #79685c; overflow-wrap: anywhere; }
-.comment-details-scroll { min-height: 0; overflow: auto; padding: 0 16px; }
+.comment-details-scroll { min-height: 0; overflow: auto; padding: 0 16px; scroll-padding-top: 76px; }
 .comment-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 16px 0; margin: 0; border-bottom: 1px solid var(--line-soft); }
 .comment-metrics dt { font-size: 11px; color: #79685c; }
 .comment-metrics dd { margin: 6px 0 0; color: var(--cocoa); font-size: 23px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -84,7 +84,34 @@
 }
 @keyframes comment-slide-in { from { transform: translateX(35px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .comment-sentiment, .comment-examples { padding-bottom: 14px; border-bottom: 1px solid var(--line-soft); }
-.comment-insight-actions { display: flex; align-items: center; gap: 5px; }
+.comment-ai-toolbar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 0; background: #fff; border-bottom: 1px solid var(--line-soft); }
+.comment-ai-title { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--coral-deep); }
+.button.comment-ai-run, .button.comment-ai-stop { min-height: 40px; padding: 9px 16px; font-size: 13px; font-weight: 650; }
+.button.comment-ai-run { box-shadow: 0 2px 5px #b94f4826; }
+.comment-ai-progress { margin-top: 12px; padding: 14px 12px; border-left: 3px solid var(--coral-deep); background: #fff5ef; color: var(--cocoa); }
+.comment-ai-progress-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+.comment-ai-progress-heading svg { color: var(--coral-deep); flex-shrink: 0; }
+.comment-ai-progress-heading > span { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; color: #79685c; }
+.comment-ai-spinner { animation: comment-ai-spin 1.1s linear infinite; }
+.comment-ai-activity { height: 4px; margin-top: 13px; background: #f0ddd4; overflow: hidden; }
+.comment-ai-activity i { display: block; height: 100%; width: 35%; background: var(--coral-deep); animation: comment-ai-scan 1.8s ease-in-out infinite; }
+.comment-ai-stages { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; list-style: none; padding: 0; margin: 10px 0; font-size: 11px; color: #79685c; }
+.comment-ai-stages li { overflow-wrap: anywhere; }
+.comment-ai-stages .is-active { font-weight: 700; color: var(--coral-deep); }
+.comment-ai-stages .is-done { color: #39785e; }
+.comment-ai-progress p { margin: 10px 0 6px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.comment-ai-progress small { display: block; font-size: 11px; color: #79685c; line-height: 1.7; }
+.comment-opinion { padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); }
+.comment-opinion .comment-section-heading h3 { display: flex; align-items: center; gap: 6px; color: var(--coral-deep); font-size: 13px; }
+.comment-opinion .comment-section-heading > span { font-size: 11px; color: #79685c; }
+.comment-opinion-section { padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.comment-opinion-section.is-overall { padding-left: 12px; border-left: 3px solid #527e6b; margin-top: 8px; }
+.comment-opinion-section h4 { margin: 0; font-size: 12px; color: #52656c; }
+.comment-opinion-section p { margin: 7px 0; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; white-space: pre-wrap; }
+.comment-opinion-section summary { cursor: pointer; font-size: 11px; color: #527e6b; padding: 4px 0; width: fit-content; }
+.comment-opinion-section blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--line); color: #79685c; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+@keyframes comment-ai-spin { to { transform: rotate(360deg); } }
+@keyframes comment-ai-scan { from { transform: translateX(-110%); } to { transform: translateX(390%); } }
 .comment-sentiment-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding-top: 8px; }
 .comment-sentiment-stat { display: grid; gap: 6px; min-width: 0; color: #52656c; font-size: 12px; }
 .comment-sentiment-stat.is-positive { color: #39785e; }
@@ -108,4 +135,4 @@
 .comment-engagement { display: flex; flex-wrap: wrap; gap: 7px 14px; color: #79685c; font-size: 11px; }
 .comment-engagement span { display: inline-flex; gap: 4px; align-items: center; }
 .comment-example-reason { margin: 9px 0 0; font-size: 12px; line-height: 1.7; color: #52656c; overflow-wrap: anywhere; }
-@media (prefers-reduced-motion: reduce) { .comment-details { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .comment-details, .comment-ai-spinner, .comment-ai-activity i { animation: none; } .comment-ai-activity i { width: 100%; opacity: .55; } }

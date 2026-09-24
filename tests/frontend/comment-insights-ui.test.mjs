@@ -54,6 +54,13 @@ try {
         const job = pending.get(id);
         job.resolve({
           schemaVersion: 1, generatedAt: Date.now(), promptVersion: "test-v1",
+          publicOpinion: { status: "complete", sections: [
+            { kind: "overall", summary: "评论同时出现对讲解清晰度的认可和对质量的不满，讨论存在不同立场。当前证据不足以推断全部用户的共识。", sourceIds: job.payload.records.filter((row) => row.kind === "comment").slice(0, 2).map((row) => row.sourceId) },
+            { kind: "positives", summary: "解释清楚带来了实用价值的认可。可以保留讲解方式，但不能据此推断整体满意程度。", sourceIds: [job.payload.records.find((row) => row.kind === "comment").sourceId] },
+            { kind: "concerns", summary: "评论者对质量提出负面评价，但没有给出具体场景。建议先询问问题细节，再核实原因，不宜直接作出质量定论。", sourceIds: [job.payload.records.filter((row) => row.kind === "comment")[1].sourceId] },
+            { kind: "demands", summary: "评论中有对更新时间的询问，体现出信息透明的诉求。可以回应当前进展，避免承诺尚未确认的时间。", sourceIds: [job.payload.records.filter((row) => row.kind === "comment")[2].sourceId] },
+            { kind: "response", summary: "先回应质量顾虑并收集使用场景，再单独同步更新进展。对认可保持感谢，不用正面评论抵消具体投诉。", sourceIds: job.payload.records.filter((row) => row.kind === "comment").slice(1, 3).map((row) => row.sourceId) },
+          ] },
           sentiments: job.payload.records.filter((record) => record.kind === "comment" && !record.content.startsWith("未覆盖"))
             .map((record) => ({
               sourceId: record.sourceId,
@@ -63,7 +70,7 @@ try {
         });
       },
       fail: () => pending.get(requests.at(-1).requestId).reject(new Error("测试服务失败")),
-      progress: (requestId, message) => progressListener?.({ requestId, message }),
+      progress: (requestId, message, details = {}) => progressListener?.({ requestId, message, ...details }),
       add: (rows) => captureListener?.({ accountId: "insights-A", kind: "comments", runId: "test-capture", comments: rows, notes: [] }),
     };
   });
@@ -86,12 +93,41 @@ try {
   });
   await page.getByRole("button", { name: "分析评论", exact: true }).click();
   await page.getByRole("button", { name: "停止分析", exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => qa.requests[0].includePublicOpinion), true);
+  await page.evaluate(() => qa.progress(qa.requests.at(-1).requestId, "正在综合评论观点，生成舆情判断与回应建议", { phase: "opinion_synthesis", elapsedMs: 72000, totalRecords: 6, analyzedRecords: 6, totalBatches: 1, completedBatches: 1 }));
+  await page.waitForFunction(() => document.querySelector(".comment-ai-stages [aria-current=step]")?.textContent === "舆情总结");
+  assert.equal(await page.locator(".comment-ai-stages [aria-current=step]").textContent(), "舆情总结");
+  assert.match(await page.getByRole("status", { name: "AI 分析进度" }).textContent(), /1 分 12 秒/);
+  assert.notEqual(await page.locator(".comment-ai-spinner").evaluate((el) => getComputedStyle(el).animationName), "none");
+  await page.waitForFunction(() => {
+    const toolbar = document.querySelector(".comment-ai-toolbar").getBoundingClientRect();
+    const progress = document.querySelector(".comment-ai-progress").getBoundingClientRect();
+    const scroll = document.querySelector(".comment-details-scroll").getBoundingClientRect();
+    return progress.top >= toolbar.bottom && progress.bottom <= scroll.bottom + 1;
+  });
+  await page.screenshot({ path: path.join(output, "opinion-running-desktop.png") });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  assert.equal(await page.locator(".comment-ai-spinner").evaluate((el) => getComputedStyle(el).animationName), "none");
+  assert.equal(await page.locator(".comment-ai-activity i").evaluate((el) => getComputedStyle(el).animationName), "none");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(output, "opinion-running-mobile.png") });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   const sent = await page.evaluate(() => JSON.stringify(qa.requests[0].records));
   assert.ok(!sent.includes("private-uid") && !sent.includes("用户甲") && !sent.includes("账号 B"));
   await page.evaluate(() => qa.progress("other-job", "错误任务进度"));
   assert.equal(await page.getByText("错误任务进度", { exact: true }).count(), 0);
   await page.evaluate(() => qa.complete());
   await page.getByRole("button", { name: "重新分析", exact: true }).waitFor();
+  assert.equal(await page.locator(".comment-ai-progress").count(), 0);
+  assert.equal(await page.locator(".comment-opinion-section").count(), 5);
+  await page.locator(".comment-opinion-section details").first().locator("summary").click();
+  assert.match(await page.locator(".comment-opinion-section").first().textContent(), /很有帮助，解释清楚/);
+  await page.locator(".comment-opinion-section details").first().locator("summary").click();
+  await page.locator(".comment-opinion").evaluate((el) => el.scrollIntoView({ block: "start" }));
+  await page.screenshot({ path: path.join(output, "opinion-summary-desktop.png") });
+  await page.locator(".comment-ai-run").evaluate((el) => el.focus());
   assert.deepEqual(await page.locator(".comment-sentiment-stat strong").allTextContents(), ["1条", "1条", "2条"]);
   assert.equal(await page.getByText("1 条未明确判定，不归入中性", { exact: true }).count(), 1);
   assert.match(await page.getByRole("region", { name: "高点赞评论", exact: true }).locator("li").first().textContent(), /通过肯定解释质量表达认可/);
@@ -101,6 +137,17 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   const bounds = await page.locator(".comment-details").boundingBox();
   assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 391);
+  for (const width of [980, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    assert.ok(await page.locator(".comment-ai-run").evaluate((el) => el.getBoundingClientRect().height >= 40));
+    const overflow = await page.locator(".comment-opinion-section p, .comment-ai-toolbar").evaluateAll((els) => els.some((el) => el.scrollWidth > el.clientWidth + 1));
+    assert.equal(overflow, false, `Opinion UI must fit at ${width}`);
+    await page.locator(".comment-opinion").evaluate((el) => el.scrollIntoView({ block: "start" }));
+    const title = await page.locator(".comment-opinion h3").boundingBox();
+    const toolbar = await page.locator(".comment-ai-toolbar").boundingBox();
+    assert.ok(title.y >= toolbar.y + toolbar.height, "Sticky actions must not cover the summary heading");
+    await page.screenshot({ path: path.join(output, `opinion-summary-${width}.png`) });
+  }
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("button", { name: "关闭评论分析", exact: true }).click();
   await page.locator(".comment-card-open").click();

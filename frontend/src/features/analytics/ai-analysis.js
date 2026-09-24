@@ -202,6 +202,7 @@ function emptyReport(dataset) {
     topics: [],
     needs: [],
     recommendations: [],
+    publicOpinion: null,
     limitations: [],
     coverage: {
       totalRecords: Number(coverage.totalRecords) || 0,
@@ -355,6 +356,26 @@ export function materializeAiReport(raw, dataset, model) {
       ...localMetric(sources.sourceIds, sources.evidenceRefs, report.coverage.totalRecords),
     });
   });
+
+  if (asObject(payload.publicOpinion)) {
+    const kinds = ["overall", "positives", "concerns", "demands", "response"];
+    const seen = new Set();
+    const sections = [];
+    for (const item of asArray(payload.publicOpinion.sections).slice(0, 5)) {
+      if (!asObject(item) || !kinds.includes(item.kind) || seen.has(item.kind)) continue;
+      const summary = cleanText(item.summary, 600);
+      const ids = asArray(item.sourceIds);
+      if (!summary || !ids.length || ids.length > 4 || ids.some((id) => !resolve(id, commentsOnly))) continue;
+      seen.add(item.kind);
+      const sources = validatedSources(ids, resolve, commentsOnly);
+      sections.push({ kind: item.kind, summary, ...sources });
+    }
+    report.publicOpinion = {
+      status: payload.publicOpinion.status === "complete" && seen.has("overall") ? "complete" : "unavailable",
+      sections: payload.publicOpinion.status === "complete" && seen.has("overall")
+        ? sections.sort((a, b) => kinds.indexOf(a.kind) - kinds.indexOf(b.kind)) : [],
+    };
+  }
 
   report.limitations = Array.from(new Set(asArray(payload.limitations)
     .map((item) => cleanText(item, 300))

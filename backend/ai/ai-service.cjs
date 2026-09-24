@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { opinionInput, opinionMessages, normalizeOpinion } = require("./comment-opinion.cjs");
 
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -7,7 +8,7 @@ const WIRE_API_CHAT_COMPLETIONS = "chat_completions";
 const WIRE_API_RESPONSES = "responses";
 const DEFAULT_WIRE_API = WIRE_API_CHAT_COMPLETIONS;
 const DEFAULT_REASONING_EFFORT = "";
-const PROMPT_VERSION = "xhs-ai-analysis-2026-08-24-v2";
+const PROMPT_VERSION = "xhs-ai-analysis-2026-09-24-v3";
 const SETTINGS_VERSION = 2;
 const SCHEMA_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
@@ -2058,7 +2059,6 @@ class AiService {
         credentials,
         job,
       );
-      this._progress(job, { phase: "finalizing", activity: "local_validation", message: "正在本地复核全部引用并汇总最终报告" });
       const sentiments = [];
       const seenSentimentIds = new Set();
       for (const sentiment of batchResults.flatMap((result) => result.sentiments)) {
@@ -2069,6 +2069,26 @@ class AiService {
       }
       const commentCount = records.filter((record) => record.kind === "comment").length;
       const missingSentiments = commentCount - sentiments.length;
+      let publicOpinion;
+      if (payload.includePublicOpinion === true && commentCount) {
+        const input = opinionInput(records, sentiments, topics, needs);
+        try {
+          const content = await this._fetchCompletion({
+            ...credentials, messages: opinionMessages(input), controller: job.controller, job, maxTokens: 4096,
+            progressContext: {
+              phase: "opinion_synthesis",
+              waitingMessage: "正在综合评论观点，生成舆情判断与回应建议",
+              readingMessage: "正在接收舆情总结",
+              validatingMessage: "正在核对舆情判断引用的评论依据",
+            },
+          });
+          publicOpinion = normalizeOpinion(parseJsonContent(content), input, modelText);
+        } catch {
+          this._throwIfJobStopped(job);
+          publicOpinion = { status: "unavailable", sections: [] };
+        }
+      }
+      this._progress(job, { phase: "finalizing", activity: "local_validation", message: "正在本地复核全部引用并汇总最终报告" });
       const limitations = unique([
         ...batchResults.flatMap((result) => result.limitations),
         ...synthesized.limitations,
@@ -2092,6 +2112,7 @@ class AiService {
         topics,
         needs,
         recommendations: synthesized.recommendations,
+        ...(publicOpinion ? { publicOpinion } : {}),
         limitations,
       };
       this._progress(job, { phase: "completed", message: "AI 分析完成，来源关联已校验" });
