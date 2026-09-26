@@ -1,4 +1,9 @@
-# 多平台采集工作台 v2.1.0
+# 多平台采集工作台 v2.1.1
+
+## 初始化修复
+
+- 修复新建抖音账号时，早到的页面导航或状态事件导致工作区误用小红书默认链接的问题。
+- 尚未登记或已移除账号的页面事件不再创建工作区，防止旧事件恢复已删除的数据空间。
 
 ## 抖音评论接入
 
@@ -40,8 +45,8 @@
 
 ## 安装包
 
-- Windows x64：`xiaohongshu-multi-account-2.1.0-x64.exe`。
-- macOS Apple Silicon：`xiaohongshu-multi-account-2.1.0-arm64.dmg`；当前通过发布页下载安装。
+- Windows x64：`xiaohongshu-multi-account-2.1.1-x64.exe`。
+- macOS Apple Silicon：`xiaohongshu-multi-account-2.1.1-arm64.dmg`；当前通过发布页下载安装。
 - 安装包不包含用户的账号会话、Cookie、采集结果或 AI 密钥。
 - Windows 安装包尚未配置代码签名，可能显示“未知发布者”。
 

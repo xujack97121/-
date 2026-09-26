@@ -17,7 +17,7 @@ try {
     const saved = JSON.parse(localStorage.getItem("xhs-collector-account-cache-v2") || "null");
     const accounts = saved?.accounts || [{ id: "qa-xhs", name: "小红书测试账号", platform: "xhs", loginState: "logged-in" }];
     let activeId = saved?.activeAccountId || "qa-xhs";
-    const callbacks = { status: [], capture: [], account: [] };
+    const callbacks = { status: [], capture: [], account: [], navigation: [] };
     const emit = (type, payload) => callbacks[type].forEach((callback) => callback(payload));
     const subscribe = (type) => (callback) => { callbacks[type].push(callback); return () => { callbacks[type] = callbacks[type].filter((item) => item !== callback); }; };
     const calls = [];
@@ -39,13 +39,16 @@ try {
         add: async (options) => {
           calls.push({ method: "add", options });
           accounts.push({ id: "qa-douyin", name: options.name, platform: options.platform, url: "https://www.douyin.com/", loginState: "logged-in" });
+          // Native views can navigate before the account list has reached the renderer.
+          emit("navigation", { accountId: "qa-douyin", url: "https://www.douyin.com/" });
+          emit("status", { accountId: "qa-douyin", platform: "douyin", active: false, phase: "loading", kind: "notes" });
           return { accountId: "qa-douyin" };
         },
         switch: async (accountId) => { activeId = accountId; return { ok: true }; },
         onStatus: subscribe("account"),
       },
       setBrowserBounds() {}, setDataDashboardOpen() {},
-      onCapture: subscribe("capture"), onStatus: subscribe("status"),
+      onCapture: subscribe("capture"), onStatus: subscribe("status"), onNavigation: subscribe("navigation"),
       openNote: async (accountId, note) => { calls.push({ method: "open", accountId, note }); return { url: note.link }; },
       home: async (accountId) => { calls.push({ method: "home", accountId }); return { ok: true }; },
       startTask: async (accountId, task) => {

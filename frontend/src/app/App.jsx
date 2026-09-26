@@ -1557,14 +1557,14 @@ export function App() {
     if (typeof desktop?.onNavigation === "function") {
       unsubscribers.push(desktop.onNavigation((state = {}) => {
         const accountId = resolveEventAccountId(state, activeAccountRef.current, accountsRef.current.length);
-        if (!accountId || !state.url) return;
+        if (!accountId || !state.url || !accountsRef.current.some((account) => account.id === accountId)) return;
         setWorkspaceSection("ui", { currentUrl: state.url }, accountId);
       }));
     }
     if (typeof desktop?.onStatus === "function") {
       unsubscribers.push(desktop.onStatus((status = {}) => {
         const accountId = resolveEventAccountId(status, activeAccountRef.current, accountsRef.current.length);
-        if (!accountId) return;
+        if (!accountId || !accountsRef.current.some((account) => account.id === accountId)) return;
         setRuntimeStatuses((previous) => ({
           ...previous,
           [accountId]: {
