@@ -17,7 +17,7 @@ const { AiService } = require("./ai/ai-service.cjs");
 const { AppUpdates, requestReleaseRedirect } = require("./platform/app-updates.cjs");
 const { expandedDataDashboardBounds, fitWindowBounds } = require("./platform/data-dashboard-window.cjs");
 const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./platform/renderer-url.cjs");
-const { platformHome, isPlatformPage, douyinVideoId, douyinVideoUrl, douyinResponseScope } = require("./platform/content-platforms.cjs");
+const { platformHome, isPlatformPage, platformNavigationUrl, isXhsCapturePage, xhsResponseScope, douyinVideoId, douyinVideoUrl, douyinResponseScope } = require("./platform/content-platforms.cjs");
 const { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT } = require("./capture/douyin-capture.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
@@ -48,12 +48,7 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) app.quit();
 
 function isXhsPage(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    return url.protocol === "https:" && (url.hostname === "xiaohongshu.com" || url.hostname.endsWith(".xiaohongshu.com"));
-  } catch {
-    return false;
-  }
+  return isPlatformPage(rawUrl, "xhs");
 }
 
 function isCollectableApi(rawUrl) {
@@ -96,6 +91,9 @@ function makeCaptureState() {
     stalls: 0,
     noteId: "",
     pendingStartRunId: "",
+    targetUrl: "",
+    navigationStarted: false,
+    error: "",
     scrollTimer: undefined,
     startTimer: undefined,
     scrollBusy: false,
@@ -136,7 +134,7 @@ async function findLiveNoteUrl(context, id) {
     });
     return match ? match.href : '';
   })()`);
-  return liveUrl && isXhsPage(liveUrl) ? liveUrl : "";
+  return liveUrl ? platformNavigationUrl(liveUrl, "xhs") : "";
 }
 
 async function waitForLiveNoteUrl(context, id, attempts = 20) {
@@ -160,12 +158,13 @@ async function resolveLiveNoteUrl(context, note) {
 
   const liveUrl = await findLiveNoteUrl(context, id);
   if (liveUrl) return liveUrl;
-  if (hasNoteNavigationToken(note?.link, id)) return note.link;
+  const suppliedUrl = platformNavigationUrl(note?.link, "xhs");
+  if (hasNoteNavigationToken(suppliedUrl, id)) return suppliedUrl;
 
   const title = String(note?.title || "").trim();
   if (title) {
     sendStatus(context, "loading", "旧链接缺少导航参数，正在通过标题重新定位笔记…");
-    const searchUrl = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(title)}`;
+    const searchUrl = `https://www.xiaohongshu.com/search_result/?keyword=${encodeURIComponent(title)}`;
     await context.view.webContents.loadURL(searchUrl);
     const recoveredUrl = await waitForLiveNoteUrl(context, id);
     if (recoveredUrl) return recoveredUrl;
@@ -408,7 +407,7 @@ function sendStatus(context, phase, message, extra = {}) {
   publishAccountStatus(context);
 }
 
-function stopAutoScroll(context, reason = "已停止") {
+function stopAutoScroll(context, reason = "已停止", phase = "stopped") {
   const state = context.capture;
   const stoppedRunId = state.runId;
   if (state.scrollTimer) clearInterval(state.scrollTimer);
@@ -420,13 +419,15 @@ function stopAutoScroll(context, reason = "已停止") {
   const collected = captureCount(context);
   const target = state.target;
   discardPendingResponsesForRun(context.pendingResponses, stoppedRunId);
+  discardPendingResponsesForRun(context.requestRuns, stoppedRunId);
   state.active = false;
   state.runId = "";
   state.pendingStartRunId = "";
+  if (phase === "error") state.error = reason;
   if (!context.operation.active && !context.disposed && !context.view.webContents.isDestroyed()) {
     context.view.webContents.setBackgroundThrottling(true);
   }
-  if (wasActive) sendStatus(context, "stopped", reason, { collected, target, runId: stoppedRunId });
+  if (wasActive) sendStatus(context, phase, reason, { collected, target, runId: stoppedRunId });
   return { wasActive, runId: stoppedRunId, collected, target };
 }
 
@@ -450,6 +451,10 @@ async function scrollOneStep(context, runId) {
       if (state.stalls >= 24) stopAutoScroll(context, result?.waiting
         ? `未检测到可滚动的评论区，已保留 ${captureCount(context)} 条；请打开评论区后重新采集`
         : `评论区暂未加载更多内容，已保留 ${captureCount(context)} 条，可重新采集`);
+      return;
+    }
+    if (state.targetUrl && !isXhsCapturePage(context.view.webContents.getURL(), state)) {
+      stopAutoScroll(context, "已离开目标页面，采集已停止");
       return;
     }
     let expandedReplies = 0;
@@ -496,25 +501,42 @@ async function startTask(context, task) {
   if (context.operation.active) throw new Error("该账号正在执行笔记操作，请稍后再采集");
   const kind = ["notes", "author", "comments"].includes(task?.kind) ? task.kind : "notes";
   const target = normalizeCaptureTarget(task?.target, kind === "comments" ? 500 : 100);
-  if (!isPlatformPage(task?.url, context.platform)) throw new Error("链接平台与当前账号不匹配");
-  const url = context.platform === "douyin" ? douyinVideoUrl(task?.url) : task.url;
+  const navigationUrl = platformNavigationUrl(task?.url, context.platform);
+  if (!navigationUrl) throw new Error("链接平台与当前账号不匹配，或链接包含不安全的协议、端口或凭据");
+  const url = context.platform === "douyin" ? douyinVideoUrl(navigationUrl) : navigationUrl;
   if (context.platform === "douyin" && (kind !== "comments" || !url)) throw new Error("抖音账号仅支持完整公开视频链接的评论采集");
   stopAutoScroll(context);
   const runId = randomUUID();
-  context.capture = { ...makeCaptureState(), active: true, runId, kind, target, noteId: context.platform === "douyin" ? douyinVideoId(url) : noteIdFromUrl(url), pendingStartRunId: runId };
+  const state = { ...makeCaptureState(), active: true, runId, kind, target, targetUrl: url, noteId: context.platform === "douyin" ? douyinVideoId(url) : noteIdFromUrl(url), pendingStartRunId: runId };
+  context.capture = state;
   sendStatus(context, "loading", `正在打开真实${context.platform === "douyin" ? "抖音视频" : "小红书"}页面…`, { collected: 0, target });
+  let listening = false;
   try {
+    await attachNetworkCapture(context);
+    listening = true;
+    if (!isActiveCaptureRun(context.capture, runId) || context.disposed) throw new Error("该采集任务已取消或被新任务替换");
+    state.navigationStarted = true;
     await context.view.webContents.loadURL(url);
+    if (state.error) throw new Error(state.error);
+    if (context.capture !== state || context.disposed) throw new Error("该采集任务已取消或被新任务替换");
   } catch (error) {
-    stopAutoScroll(context, "页面加载失败，采集已停止");
-    throw error;
+    const replaced = context.capture !== state || context.disposed || !state.active && !state.error;
+    const message = state.error || (replaced ? "该采集任务已取消或被新任务替换" : /ERR_TOO_MANY_REDIRECTS/.test(error?.code || "")
+      ? "平台页面反复重定向，采集已停止；请在左侧检查登录或验证状态后重试"
+      : /^ERR_[A-Z_]+$/.test(error?.code || "")
+        ? `页面加载失败（${error.code}），采集已停止；请检查网络或左侧页面后重试`
+        : listening ? "页面加载失败，采集已停止；请检查左侧页面后重试"
+          : "网络监听启动失败，采集未开始；请重启软件后重试");
+    if (isActiveCaptureRun(context.capture, runId)) stopAutoScroll(context, message, "error");
+    throw new Error(message);
   }
-  return { ok: true, accountId: context.id, runId, kind, target };
+  return { ok: true, accountId: context.id, runId, kind, target, active: state.active };
 }
 
 function publishCapturePayload(context, payload, runId) {
   const state = context.capture;
   if (!isActiveCaptureRun(state, runId)) return 0;
+  if (context.platform === "xhs" && state.targetUrl && !isXhsCapturePage(context.view.webContents.getURL(), state)) return 0;
   const commentsMode = state.kind === "comments";
   if (context.platform === "douyin") {
     if (!isDouyinCapturePage(context.view.webContents.getURL(), state.noteId)) return 0;
@@ -524,6 +546,9 @@ function publishCapturePayload(context, payload, runId) {
       comments: (payload.comments || []).filter((row) => row.platform === "douyin" && row.noteId === state.noteId),
     };
     if (payload.notes.length) sendToRenderer("collector:capture", { ...payload, comments: [] });
+  }
+  if (context.platform === "xhs" && commentsMode && state.noteId) {
+    payload = { ...payload, comments: payload.comments.filter((row) => row.noteId === state.noteId) };
   }
   const seenKeys = commentsMode ? state.seenComments : state.seen;
   const selected = selectUniqueRowsWithinTarget({
@@ -566,6 +591,10 @@ async function readResponseBody(context, requestId, meta) {
     const body = result.base64Encoded ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
     if (!body || Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) return;
     const json = JSON.parse(body);
+    if (context.platform === "xhs" && json?.success === false) {
+      stopAutoScroll(context, "小红书拒绝了本次数据请求，采集已停止；请在左侧检查登录、验证或访问限制", "error");
+      return;
+    }
     const normalized = context.platform === "douyin"
       ? normalizeDouyinCapture(meta.url, json, meta.noteId, context.capture.seen)
       : normalizeCapture(meta.url, json);
@@ -598,6 +627,7 @@ async function harvestVisibleComments(context, runId) {
   const state = context.capture;
   if (!state.active || state.runId !== runId || state.kind !== "comments" || context.disposed || context.view.webContents.isDestroyed()) return 0;
   const pageUrl = context.view.webContents.getURL();
+  if (state.targetUrl && !isXhsCapturePage(pageUrl, state)) return 0;
   const rawComments = await context.view.webContents.executeJavaScript(COMMENT_DOM_CAPTURE_SCRIPT);
   const comments = normalizeDomComments(pageUrl, rawComments)
     .map((comment) => ({ ...(comment.noteId ? comment : { ...comment, noteId: state.noteId }), accountId: context.id }))
@@ -615,14 +645,22 @@ async function harvestVisibleComments(context, runId) {
 async function attachNetworkCapture(context) {
   if (context.disposed || context.attachPromise) return context.attachPromise;
   const contents = context.view.webContents;
+  context.requestRuns ||= new Map();
   context.attachPromise = (async () => {
   if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
   await contents.debugger.sendCommand("Network.enable", { maxTotalBufferSize: 50 * 1024 * 1024, maxResourceBufferSize: MAX_BODY_BYTES });
   if (!context.debuggerMessageListener) {
     context.debuggerMessageListener = (_event, method, params) => {
+    if (method === "Network.requestWillBeSent") {
+      const state = context.capture;
+      const relevant = state.active && state.navigationStarted && state.runId && (context.platform === "douyin"
+        ? isDouyinCapturePage(contents.getURL(), state.noteId) && douyinResponseScope(params.request?.url, state.noteId, state.seen)
+        : isXhsCapturePage(contents.getURL(), state) && xhsResponseScope(params.request?.url, state, state.seen));
+      if (relevant) context.requestRuns.set(params.requestId, { runId: state.runId });
+    }
     if (method === "Network.responseReceived") {
       const state = context.capture;
-      if (!state.active || !state.runId) return;
+      if (!state.active || !state.runId || context.requestRuns.get(params.requestId)?.runId !== state.runId) return;
       if (context.platform === "douyin") {
         if (!douyinResponseScope(params.response?.url, state.noteId, state.seen)
           || !isDouyinCapturePage(contents.getURL(), state.noteId)) return;
@@ -630,7 +668,14 @@ async function attachNetworkCapture(context) {
           stopAutoScroll(context, "抖音限制了当前访问，请在左侧检查登录或验证后稍后重试");
           return;
         }
-      } else if (!isCollectableApi(params.response?.url)) return;
+      } else {
+        if (!isCollectableApi(params.response?.url) || !xhsResponseScope(params.response?.url, state, state.seen)
+          || state.targetUrl && !isXhsCapturePage(contents.getURL(), state)) return;
+        if ([401, 403, 429].includes(params.response?.status)) {
+          stopAutoScroll(context, "小红书限制了本次数据请求，采集已停止；请在左侧检查登录、验证或访问限制", "error");
+          return;
+        }
+      }
       context.pendingResponses.set(params.requestId, {
         url: params.response.url,
         mimeType: params.response.mimeType || "",
@@ -641,12 +686,16 @@ async function attachNetworkCapture(context) {
       });
     }
     if (method === "Network.loadingFinished") {
+      context.requestRuns.delete(params.requestId);
       const meta = context.pendingResponses.get(params.requestId);
       if (!meta) return;
       context.pendingResponses.delete(params.requestId);
       readResponseBody(context, params.requestId, meta);
     }
-    if (method === "Network.loadingFailed") context.pendingResponses.delete(params.requestId);
+    if (method === "Network.loadingFailed") {
+      context.requestRuns.delete(params.requestId);
+      context.pendingResponses.delete(params.requestId);
+    }
     };
     contents.debugger.on("message", context.debuggerMessageListener);
   }
@@ -678,10 +727,17 @@ function wireBrowserEvents(context) {
   };
   contents.on("did-start-loading", () => publishNavigation());
   contents.on("did-stop-loading", () => publishNavigation());
-  const didNavigate = (_event, url, isMainFrame = true) => {
-    if (!isMainFrame) return;
-    if (context.platform === "douyin" && context.capture.active && !isDouyinCapturePage(url, context.capture.noteId))
+  const didNavigate = (event, legacyUrl, legacyMainFrame = true) => {
+    if ((event.isMainFrame ?? legacyMainFrame) === false) return;
+    const url = event.url ?? legacyUrl ?? contents.getURL();
+    if (context.platform === "douyin" && context.capture.active && context.capture.navigationStarted && !isDouyinCapturePage(url, context.capture.noteId))
       stopAutoScroll(context, "已离开目标视频，评论采集已停止");
+    if (context.platform === "xhs" && context.capture.active && context.capture.navigationStarted && context.capture.targetUrl && !isXhsCapturePage(url, context.capture)) {
+      const starting = Boolean(context.capture.pendingStartRunId);
+      stopAutoScroll(context, starting
+        ? "未进入指定的采集页面，任务已停止；请在左侧确认登录、验证或访问限制后重试"
+        : "已离开目标页面，采集已停止", starting ? "error" : "stopped");
+    }
     publishNavigation(url);
   };
   contents.on("did-navigate", (_event, url) => didNavigate(_event, url));
@@ -689,7 +745,7 @@ function wireBrowserEvents(context) {
   contents.on("did-finish-load", () => {
     publishNavigation();
     const runId = context.capture.pendingStartRunId;
-    if (runId && context.capture.active && context.capture.runId === runId) {
+    if (runId && context.capture.active && context.capture.navigationStarted && context.capture.runId === runId) {
       context.capture.pendingStartRunId = "";
       if (context.capture.startTimer) clearTimeout(context.capture.startTimer);
       context.capture.startTimer = setTimeout(() => startAutoScroll(context, runId), 700);
@@ -697,31 +753,40 @@ function wireBrowserEvents(context) {
     setTimeout(() => probeAccountIdentity(context).catch(() => {}), 800);
   });
   contents.on("did-fail-load", (_event, code, description, url, isMainFrame) => {
-    if (isMainFrame) sendStatus(context, "error", `页面加载失败：${description} (${code})`, { url });
+    if (isMainFrame && code !== -3 && !context.capture.pendingStartRunId)
+      sendStatus(context, context.capture.active ? "warning" : "error", `页面加载失败（错误 ${code}），请检查网络或左侧页面后重试`);
   });
   contents.setWindowOpenHandler(({ url }) => {
-    if (isPlatformPage(url, context.platform)) contents.loadURL(url);
+    const target = platformNavigationUrl(url, context.platform);
+    if (target) contents.loadURL(target).catch(() => sendStatus(context, "error", "页面加载失败，请检查网络或左侧页面后重试"));
     else openSafeExternal(url);
     return { action: "deny" };
   });
-  contents.on("will-navigate", (event, url) => {
-    if (!isPlatformPage(url, context.platform)) { event.preventDefault(); openSafeExternal(url); }
+  contents.on("will-navigate", (event, legacyUrl) => {
+    const url = event.url ?? legacyUrl;
+    if (!platformNavigationUrl(url, context.platform)) {
+      event.preventDefault();
+      if (context.capture.active) {
+        if (context.capture.navigationStarted) stopAutoScroll(context, "页面尝试离开当前平台，已阻止并停止采集", "error");
+      } else openSafeExternal(url);
+    }
   });
   contents.on("will-redirect", (event, url, _isInPlace, isMainFrame) => {
     // Embedded redirects do not navigate the account's top-level page.
     if ((event.isMainFrame ?? isMainFrame) === false) return;
     const destination = event.url ?? url;
-    if (!isPlatformPage(destination, context.platform)) {
+    if (!platformNavigationUrl(destination, context.platform)) {
       event.preventDefault();
-      if (context.capture.active) {
+      if (context.capture.active && context.capture.navigationStarted) {
         let site = "未知站点";
-        try { site = new URL(destination).hostname || "非网页地址"; } catch { /* do not display URL tokens */ }
-        stopAutoScroll(context, `页面尝试跳转至平台外（${site}），已阻止并停止采集`);
+        try { const parsed = new URL(destination); site = `${parsed.protocol}//${parsed.host}`; } catch { /* do not display URL tokens */ }
+        stopAutoScroll(context, `页面尝试跳转至平台外或不安全地址（${site}），已阻止并停止采集`, "error");
       }
     }
   });
   contents.debugger.on("detach", () => {
     context.pendingResponses.clear();
+    context.requestRuns?.clear();
     if (!context.disposed) {
       sendStatus(context, "warning", "网络监听已断开，正在自动恢复…");
       scheduleDebuggerRecovery(context);
@@ -783,12 +848,18 @@ async function probeAccountIdentity(context) {
   return publicAccount(context);
 }
 
-function hardenAccountSession(accountSession) {
+function hardenAccountSession(accountSession, platform) {
   if (hardenedSessions.has(accountSession)) return;
   hardenedSessions.add(accountSession);
   accountSession.setPermissionCheckHandler(() => false);
   accountSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   accountSession.on("will-download", (event) => event.preventDefault());
+  const domain = platform === "douyin" ? "douyin.com" : "xiaohongshu.com";
+  accountSession.webRequest.onBeforeRequest({ urls: [`http://${domain}/*`, `http://*.${domain}/*`] }, (details, callback) => {
+    if (details.resourceType !== "mainFrame") { callback({}); return; }
+    const secureUrl = platformNavigationUrl(details.url, platform);
+    callback(secureUrl ? { redirectURL: secureUrl } : { cancel: true });
+  });
 }
 
 function createAccountContext(metadata, initialUrl = platformHome(metadata.platform)) {
@@ -796,7 +867,8 @@ function createAccountContext(metadata, initialUrl = platformHome(metadata.platf
   if (existing && !existing.disposed) return existing;
 
   const accountSession = session.fromPartition(metadata.partition, { cache: true });
-  hardenAccountSession(accountSession);
+  const platform = metadata.platform || "xhs";
+  hardenAccountSession(accountSession, platform);
   const view = new WebContentsView({
     webPreferences: {
       session: accountSession,
@@ -809,13 +881,14 @@ function createAccountContext(metadata, initialUrl = platformHome(metadata.platf
   });
   const context = {
     id: metadata.id,
-    platform: metadata.platform || "xhs",
+    platform,
     session: accountSession,
     view,
     capture: makeCaptureState(),
     operation: { active: false, runId: "", startedAt: 0 },
     pendingResponses: new Map(),
-    navigation: { url: isPlatformPage(initialUrl, metadata.platform) ? initialUrl : platformHome(metadata.platform), loading: true, title: "" },
+    requestRuns: new Map(),
+    navigation: { url: platformNavigationUrl(initialUrl, platform) || platformHome(platform), loading: true, title: "" },
     identity: { state: "unknown", name: "", profileUrl: "", checkedAt: 0 },
     debuggerMessageListener: null,
     debuggerRecoveryTimer: undefined,
@@ -863,6 +936,7 @@ async function disposeAccountContext(context, { clearData = false } = {}) {
   if (context.cookieChangedListener) context.session.cookies.removeListener("changed", context.cookieChangedListener);
   context.capture.active = false;
   context.pendingResponses.clear();
+  context.requestRuns?.clear();
 
   const contents = context.view.webContents;
   if (!contents.isDestroyed()) {
@@ -1151,11 +1225,12 @@ for (const [channel, action] of [
 ipcMain.handle("browser:navigate", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
-  if (!isPlatformPage(payload?.url, context.platform)) throw new Error("链接平台与当前账号不匹配");
+  const url = platformNavigationUrl(payload?.url, context.platform);
+  if (!url) throw new Error("链接平台与当前账号不匹配，或链接包含不安全的协议、端口或凭据");
   if (context.operation.active) throw new Error("该账号正在执行笔记操作");
   stopAutoScroll(context);
-  await context.view.webContents.loadURL(payload.url);
-  return { ok: true, accountId: context.id, url: payload.url };
+  await context.view.webContents.loadURL(url);
+  return { ok: true, accountId: context.id, url };
 });
 ipcMain.handle("browser:open-note", async (event, payload) => {
   assertMainRenderer(event);

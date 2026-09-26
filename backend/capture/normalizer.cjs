@@ -1,4 +1,5 @@
 const XHS_WEB_ORIGIN = "https://www.xiaohongshu.com/";
+const { platformNavigationUrl } = require("../platform/content-platforms.cjs");
 
 const asText = (value) => value == null ? "" : String(value);
 
@@ -75,7 +76,8 @@ function noteLinkFromNode(node, card, sourceUrl, id) {
   if (explicit) {
     try {
       const candidate = new URL(explicit, XHS_WEB_ORIGIN);
-      if ((candidate.hostname === "xiaohongshu.com" || candidate.hostname.endsWith(".xiaohongshu.com")) && candidate.pathname.includes(id)) return candidate.href;
+      const link = platformNavigationUrl(candidate.href, "xhs");
+      if (link && candidate.pathname.includes(id)) return link;
     } catch { /* fall back to a canonical note URL */ }
   }
 

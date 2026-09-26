@@ -1,6 +1,6 @@
 {
   "name": "xiaohongshu-multi-account-collector",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "description": "支持多账号隔离登录的小红书公开数据采集与笔记操作工作台",
   "author": "xujack",
   "private": true,
@@ -15,7 +15,7 @@
     "package:win": "npm run build && npm run desktop:check && electron-builder --win nsis --x64 --publish never",
     "package:mac": "npm run build && npm run desktop:check && electron-builder --mac dmg --arm64 --publish never",
     "check": "npm run build && npm run desktop:check && npm test && npm run test:douyin && npm run test:opinion && npm run test:updates && node scripts/verify-release.cjs",
-    "test:douyin": "node --test tests/backend/douyin-capture.test.cjs && node tests/frontend/douyin-comments.test.mjs",
+    "test:douyin": "node --test tests/backend/douyin-capture.test.cjs tests/backend/xhs-navigation.test.cjs && node tests/frontend/douyin-comments.test.mjs",
     "test:opinion": "node --test tests/backend/comment-opinion.test.cjs",
     "test:updates": "node --test tests/backend/app-updates.test.cjs && node tests/packaging/release-workflow.test.cjs",
     "test": "node tests/frontend/analytics.test.mjs && node tests/frontend/ai-analysis.test.mjs && node tests/backend/ai-service.test.cjs && node --test tests/backend/ai-stream-compatibility.test.cjs && node tests/backend/preload-ai-routing.test.cjs && node tests/backend/renderer-url.test.cjs && node tests/backend/data-dashboard-window.test.cjs && node tests/frontend/service-worker.test.mjs && node tests/backend/desktop-normalizer.test.cjs && node tests/backend/capture-lifecycle.test.cjs && node tests/backend/account-registry.test.cjs && node tests/backend/preload-account-routing.test.cjs && node tests/backend/app-icon.test.cjs && node tests/packaging/installer-config.test.cjs && node tests/frontend/comment-randomizer.test.mjs && node tests/frontend/comment-time-filter.test.mjs && node tests/frontend/note-time-filter.test.mjs && node tests/frontend/operation-interval.test.mjs && node tests/frontend/operation-status.test.mjs && node tests/frontend/comment-notes.test.mjs && node tests/frontend/comment-insights.test.mjs",

@@ -128,7 +128,7 @@ function harness(platform = "douyin") {
     debugger: Object.assign(new EventEmitter(), { isAttached: () => true, sendCommand: async () => ({ body: JSON.stringify({ comments: [row("7530000000000000001")] }) }) }),
   });
   const context = {
-    id: `mock-${platform}-account`, platform, capture: sandbox.testApi.makeCaptureState(),
+    id: `mock-${platform}-account`, platform, capture: { ...sandbox.testApi.makeCaptureState(), navigationStarted: true },
     operation: { active: false }, view: { webContents: contents }, navigation: {}, pendingResponses: new Map(),
     identity: { state: "unknown" },
   };
@@ -178,7 +178,7 @@ test("Main-frame redirects accept both current event details and legacy argument
         assert.equal(prevented, !allowed);
         assert.equal(h.context.capture.active, allowed);
         if (!allowed) {
-          const stopped = h.messages.find((item) => item.channel === "collector:status" && item.payload.phase === "stopped");
+          const stopped = h.messages.find((item) => item.channel === "collector:status" && item.payload.phase === "error");
           assert.match(stopped.payload.message, /outside\.example/);
           assert.equal(stopped.payload.message.includes("private-fixture"), false, "Do not display URL tokens");
         }
@@ -231,4 +231,66 @@ test("Visible login or verification pauses instead of scrolling; no global video
   assert.equal(scrolls, 0);
   assert.ok(h.messages.some((item) => item.payload.message === "请在左侧完成安全验证"));
   assert.equal(DOUYIN_COMMENT_SCROLL_SCRIPT.includes("document.scrollingElement"), false);
+});
+
+test("XHS old search links are canonicalized and network listening is ready before navigation", async () => {
+  const h = harness("xhs");
+  const events = [];
+  h.contents.debugger.sendCommand = async () => { events.push("listening"); };
+  h.contents.loadURL = async (url) => { events.push(url); h.setUrl(url); };
+  const result = await h.startTask(h.context, { kind: "notes", url: "https://www.xiaohongshu.com/search_result?keyword=fixture" });
+  assert.equal(events[0], "listening");
+  assert.equal(events[1], "https://www.xiaohongshu.com/search_result/?keyword=fixture");
+  assert.equal(result.active, true);
+  assert.equal(h.context.capture.navigationStarted, true);
+});
+
+test("failure to attach the listener cannot start an unobserved capture", async () => {
+  const h = harness("xhs");
+  let navigated = false;
+  h.contents.debugger.sendCommand = async () => { throw new Error("private diagnostic"); };
+  h.contents.loadURL = async () => { navigated = true; };
+  await assert.rejects(h.startTask(h.context, { kind: "notes", url: "https://www.xiaohongshu.com/search_result?keyword=fixture" }), /网络监听启动失败/);
+  assert.equal(navigated, false);
+  assert.equal(h.context.capture.active, false);
+  assert.equal(h.messages.some((item) => String(item.payload.message).includes("private")), false);
+});
+
+test("a cancelled old navigation cannot stop a newer capture run", async () => {
+  const h = harness("xhs");
+  let rejectOld;
+  h.contents.loadURL = (url) => {
+    if (url.includes("keyword=old")) return new Promise((_resolve, reject) => { rejectOld = reject; });
+    h.setUrl(url);
+    return Promise.resolve();
+  };
+  const old = h.startTask(h.context, { kind: "notes", url: "https://www.xiaohongshu.com/search_result?keyword=old" }).catch((error) => error);
+  for (let i = 0; i < 20 && !rejectOld; i++) await Promise.resolve();
+  assert.ok(rejectOld);
+  const next = await h.startTask(h.context, { kind: "notes", url: "https://www.xiaohongshu.com/search_result?keyword=new" });
+  rejectOld(Object.assign(new Error("private URL token"), { code: "ERR_ABORTED" }));
+  assert.match((await old).message, /新任务替换/);
+  assert.equal(h.context.capture.active, true);
+  assert.equal(h.context.capture.runId, next.runId);
+  assert.equal(h.messages.some((item) => item.payload.phase === "error" && item.payload.runId === next.runId), false);
+});
+
+test("XHS pending requests cannot move from an old run or unrelated feed into a new run", async () => {
+  const h = harness("xhs");
+  const api = "https://edith.xiaohongshu.com/api/sns/web/v1/search/notes";
+  const emit = (method, params) => h.contents.debugger.emit("message", {}, method, params);
+  await h.startTask(h.context, { kind: "notes", url: "https://www.xiaohongshu.com/search_result?keyword=old" });
+  emit("Network.requestWillBeSent", { requestId: "old", request: { url: api } });
+  assert.equal(h.context.requestRuns.size, 1);
+  await h.startTask(h.context, { kind: "notes", url: "https://www.xiaohongshu.com/search_result?keyword=new" });
+  emit("Network.responseReceived", { requestId: "old", response: { url: api, status: 200 } });
+  assert.equal(h.context.pendingResponses.size, 0);
+  const feed = "https://edith.xiaohongshu.com/api/sns/web/v1/homefeed";
+  emit("Network.requestWillBeSent", { requestId: "feed", request: { url: feed } });
+  emit("Network.responseReceived", { requestId: "feed", response: { url: feed, status: 200 } });
+  assert.equal(h.context.requestRuns.size, 0);
+  assert.equal(h.context.pendingResponses.size, 0);
+  emit("Network.requestWillBeSent", { requestId: "new", request: { url: api } });
+  emit("Network.responseReceived", { requestId: "new", response: { url: api, status: 200 } });
+  assert.equal(h.context.pendingResponses.get("new").runId, h.context.capture.runId);
 });

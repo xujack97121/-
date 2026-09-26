@@ -1097,14 +1097,14 @@ function SearchPanel({ accountId, accountName, capture, data, state, setState, k
 
   const openSearch = async () => {
     const target = Math.min(1000, Math.max(1, Math.floor(Number(limit) || 100)));
-    const url = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword.trim() || "创业")}`;
+    const url = `https://www.xiaohongshu.com/search_result/?keyword=${encodeURIComponent(keyword.trim() || "创业")}`;
     if (target !== limit) setState({ limit: target });
     setCurrentUrl(url);
     try {
       if (data.desktopMode) {
-        await callDesktop("startTask", accountId, { kind: "notes", url, target });
-        setLive(true);
-        notify("真实搜索页已打开，正在监听响应并自动滚动。", "success");
+        const result = await callDesktop("startTask", accountId, { kind: "notes", url, target });
+        setLive(result?.active !== false);
+        notify(result?.active === false ? "本轮采集已结束。" : "真实搜索页已打开，正在监听响应并自动滚动。", "success");
       } else if (data.extensionMode) {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab?.id) await chrome.tabs.update(tab.id, { url });
