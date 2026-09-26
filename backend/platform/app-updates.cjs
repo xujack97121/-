@@ -4,6 +4,7 @@ const path = require("node:path");
 const RELEASE_PAGE = "https://github.com/xujack97121/-/releases/latest";
 const RELEASE_API = "https://api.github.com/repos/xujack97121/-/releases/latest";
 const FEED = Object.freeze({ provider: "github", owner: "xujack97121", repo: "-", private: false });
+const CHECK_TIMEOUT_MS = 8_000;
 
 function newerVersion(candidate, current) {
   const parse = (value) => /^v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/.exec(String(value || ""))?.slice(1).map(Number);
@@ -18,14 +19,60 @@ function updateError(error) {
   if (/SHA512|CHECKSUM|SIGNATURE/.test(code)) return "安装包校验未通过，已停止更新，请重新检查并下载。";
   if (/ENOSPC/.test(code)) return "磁盘空间不足，请清理空间后重试。";
   if (/EACCES|EPERM/.test(code)) return "无法写入更新文件，请检查安装目录权限。";
+  if (code === "ERR_UPDATE_METADATA") return "未能确认 GitHub 官方版本信息，请重试检查或前往下载新版。";
+  if (code === "ERR_UPDATE_RATE_LIMIT") return "GitHub 暂时限制更新检查，请稍后重试或前往下载新版。";
+  if (code === "ERR_UPDATE_HTTP") return "GitHub 更新服务暂不可用，请稍后重试或前往下载新版。";
+  const details = [code, error?.name, error?.message, error?.cause?.code].join(" ");
+  if (/TimeoutError|AbortError|TIMEDOUT|ERR_TIMED_OUT/.test(details)) return "连接更新服务超时，请检查网络或系统代理后重试，也可前往下载新版。";
+  if (/ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED/.test(details)) return "无法解析更新服务地址，请检查网络或 DNS 后重试，也可前往下载新版。";
+  if (/PROXY|TUNNEL/.test(details)) return "无法通过系统代理连接更新服务，请检查代理后重试，也可前往下载新版。";
   return "更新请求失败，请检查网络或稍后重试，也可前往 GitHub 下载。";
 }
 
+function requestReleaseRedirect(net) {
+  return new Promise((resolve, reject) => {
+    const request = net.request({ url: RELEASE_PAGE, method: "HEAD", credentials: "omit", useSessionCookies: false, redirect: "manual" });
+    let settled = false;
+    const finish = (error, response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(response);
+      request.abort();
+    };
+    const timer = setTimeout(() => finish(new DOMException("Release lookup timed out", "TimeoutError")), CHECK_TIMEOUT_MS);
+    request.on("redirect", (status, _method, location) => finish(null, { status, location }));
+    request.on("response", (response) => {
+      response.on("error", (error) => finish(error));
+      finish(null, { status: response.statusCode, location: response.headers.location?.[0] || "" });
+    });
+    request.on("error", (error) => finish(error));
+    request.on("abort", () => finish(new DOMException("Release lookup aborted", "AbortError")));
+    try {
+      request.setHeader("Cache-Control", "no-cache");
+      request.end();
+    } catch (error) {
+      finish(error);
+    }
+  });
+}
+
+function releaseRedirectVersion(response) {
+  const invalid = () => { throw Object.assign(new Error("Invalid release redirect"), { code: "ERR_UPDATE_METADATA" }); };
+  if (![301, 302, 303, 307, 308].includes(response.status)) invalid();
+  const location = response.location;
+  if (!location) invalid();
+  const url = new URL(location, RELEASE_PAGE);
+  if (url.origin !== "https://github.com" || url.username || url.password || url.search || url.hash) invalid();
+  return /^\/xujack97121\/-\/releases\/tag\/v(\d{1,6}\.\d{1,6}\.\d{1,6})$/.exec(url.pathname)?.[1] || invalid();
+}
+
 class AppUpdates {
-  constructor({ version, isPackaged, platform = process.platform, updater, settingsPath, fetchImpl, openRelease, beforeInstall, onState = () => {} }) {
+  constructor({ version, isPackaged, platform = process.platform, updater, settingsPath, fetchImpl, releaseRedirectImpl, openRelease, beforeInstall, onState = () => {} }) {
     this.updater = updater;
     this.settingsPath = settingsPath;
     this.fetchImpl = fetchImpl;
+    this.releaseRedirectImpl = releaseRedirectImpl;
     this.openRelease = openRelease;
     this.beforeInstall = beforeInstall;
     this.onState = onState;
@@ -43,6 +90,7 @@ class AppUpdates {
       transferred: 0,
       total: 0,
       checkedAt: null,
+      checkSource: "",
       error: "",
     };
     if (this.state.mode === "automatic") {
@@ -128,23 +176,37 @@ class AppUpdates {
   async check() {
     if (this.state.mode === "development" || ["downloading", "downloaded", "installing"].includes(this.state.status)) return this.getState();
     return this.run(async () => {
-      this.setState({ status: "checking", error: "" });
+      this.setState({ status: "checking", checkSource: "", error: "" });
       if (this.state.mode === "automatic") {
         await this.updater.checkForUpdates();
         return;
       }
+      const latestVersion = await this.lookupLatestVersion();
+      const available = newerVersion(latestVersion, this.state.currentVersion);
+      this.setState({ status: available ? "available" : "current", latestVersion: available ? latestVersion : "", checkedAt: Date.now(), error: "" });
+    });
+  }
+
+  async lookupLatestVersion() {
+    this.setState({ checkSource: "api" });
+    try {
       const response = await this.fetchImpl(RELEASE_API, {
         headers: { Accept: "application/vnd.github+json" },
-        credentials: "omit",
-        redirect: "error",
-        signal: AbortSignal.timeout(20_000),
+        credentials: "omit", cache: "no-store", redirect: "error",
+        signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
       });
       if (!response.ok) throw new Error("Release lookup failed");
       const release = await response.json();
-      if (release.draft || release.prerelease || !/^v\d+\.\d+\.\d+$/.test(release.tag_name || "")) throw new Error("Invalid stable release");
-      const available = newerVersion(release.tag_name, this.state.currentVersion);
-      this.setState({ status: available ? "available" : "current", latestVersion: available ? release.tag_name.slice(1) : "", checkedAt: Date.now(), error: "" });
-    });
+      if (release.draft || release.prerelease || !/^v\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(release.tag_name || "")) throw new Error("Invalid stable release");
+      return release.tag_name.slice(1);
+    } catch {
+      // GitHub's public latest redirect avoids the API's separate rate limit.
+      this.setState({ checkSource: "release-page" });
+      const response = await this.releaseRedirectImpl();
+      if ([403, 429].includes(response.status)) throw Object.assign(new Error("Release lookup limited"), { code: "ERR_UPDATE_RATE_LIMIT" });
+      if (response.status >= 400) throw Object.assign(new Error("Release lookup unavailable"), { code: "ERR_UPDATE_HTTP" });
+      return releaseRedirectVersion(response);
+    }
   }
 
   async download() {
@@ -170,7 +232,11 @@ class AppUpdates {
   }
 
   async openDownloadPage() {
-    await this.openRelease(RELEASE_PAGE);
+    try {
+      await this.openRelease(RELEASE_PAGE);
+    } catch {
+      this.setState({ error: "无法打开默认浏览器，请在浏览器中访问 github.com/xujack97121/-/releases/latest 下载新版。" });
+    }
     return this.getState();
   }
 
@@ -181,4 +247,4 @@ class AppUpdates {
   }
 }
 
-module.exports = { AppUpdates, newerVersion, RELEASE_PAGE, FEED };
+module.exports = { AppUpdates, newerVersion, requestReleaseRedirect, RELEASE_PAGE, FEED };

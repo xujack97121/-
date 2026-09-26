@@ -14,7 +14,7 @@ const { normalizeCapture, normalizeDomComments } = require("./capture/normalizer
 const { AccountRegistry } = require("./accounts/account-registry.cjs");
 const { resolveAppIconPath, setDockIconSafely } = require("./platform/app-icon.cjs");
 const { AiService } = require("./ai/ai-service.cjs");
-const { AppUpdates } = require("./platform/app-updates.cjs");
+const { AppUpdates, requestReleaseRedirect } = require("./platform/app-updates.cjs");
 const { expandedDataDashboardBounds, fitWindowBounds } = require("./platform/data-dashboard-window.cjs");
 const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./platform/renderer-url.cjs");
 const { platformHome, isPlatformPage, douyinVideoId, douyinVideoUrl, douyinResponseScope } = require("./platform/content-platforms.cjs");
@@ -994,6 +994,7 @@ async function createWindow() {
       settingsPath: path.join(app.getPath("userData"), "update-settings.json"),
       fetchImpl: (url, options) => net.fetch(url, options),
       openRelease: (url) => shell.openExternal(url),
+      releaseRedirectImpl: () => requestReleaseRedirect(net),
       onState: (state) => sendToRenderer("updates:state", state),
       beforeInstall: async () => {
         assertIdleForUpdate();

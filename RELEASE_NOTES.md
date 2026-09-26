@@ -1,4 +1,13 @@
-# 多平台采集工作台 v2.1.2
+# 多平台采集工作台 v2.1.3
+
+## 更新检查修复
+
+- macOS 检查更新不再只依赖 GitHub API：接口不可达、超时或受限时，改用 GitHub 官方最新发布页的重定向确认版本。
+- 两条检查链路各设置 8 秒超时；只接受本仓库 HTTPS 稳定版本标签，不跟随备用检查跳转、不访问第三方镜像、不发送账号 Cookie 或 API 密钥。
+- 更新失败区分网络、DNS、代理、超时及服务异常；提供“重试检查”，并突出“前往下载新版”。
+- 修复打开默认浏览器失败时缺少明确提示的问题；失败不会丢弃已下载的 Windows 更新。
+- 增加 Windows/macOS 的真实 Electron 更新检查回归，覆盖 API 故障、超时、备用发布页、错误地址拦截、无 Cookie 请求及失败重试。
+- macOS 仍使用 DMG 安装包替换应用，尚不支持软件内自动安装；GitHub 整体不可达时仍需恢复网络后下载。
 
 ## 采集误停修复
 
@@ -53,8 +62,8 @@
 
 ## 安装包
 
-- Windows x64：`xiaohongshu-multi-account-2.1.2-x64.exe`。
-- macOS Apple Silicon：`xiaohongshu-multi-account-2.1.2-arm64.dmg`；当前通过发布页下载安装。
+- Windows x64：`xiaohongshu-multi-account-2.1.3-x64.exe`。
+- macOS Apple Silicon：`xiaohongshu-multi-account-2.1.3-arm64.dmg`；当前通过发布页下载安装。
 - 安装包不包含用户的账号会话、Cookie、采集结果或 AI 密钥。
 - Windows 安装包尚未配置代码签名，可能显示“未知发布者”。
 

@@ -23,6 +23,13 @@ async function fixture(t, options = {}) {
     settingsPath: path.join(directory, "updates.json"),
     beforeInstall: async () => true,
     openRelease: async (url) => calls.push(["open", url]),
+    releaseRedirectImpl: async () => {
+      const response = await options.fetchImpl(RELEASE_PAGE, {
+        method: "HEAD", credentials: "omit", redirect: "manual",
+        headers: { "Cache-Control": "no-cache" },
+      });
+      return { status: response.status, location: response.headers.get("location") };
+    },
     ...options,
   });
   t.after(async () => { service.dispose(); await fs.rm(directory, { recursive: true, force: true }); });
@@ -141,4 +148,152 @@ test("unsigned macOS checks releases but opens only the fixed official download 
   await service.openDownloadPage();
   assert.deepEqual(calls, [["open", RELEASE_PAGE]]);
   assert.deepEqual(urls, ["https://api.github.com/repos/xujack97121/-/releases/latest"]);
+});
+
+test("macOS falls back to the official latest-release redirect when the API is unavailable", async (t) => {
+  for (const failure of ["rate-limit", "timeout", "network", "invalid-json"]) {
+    const requests = [];
+    const { service, calls } = await fixture(t, {
+      platform: "darwin",
+      fetchImpl: async (url, options) => {
+        requests.push({ url, options });
+        if (url === RELEASE_PAGE) return new Response(null, {
+          status: 302, headers: { Location: "https://github.com/xujack97121/-/releases/tag/v2.1.3" },
+        });
+        if (failure === "rate-limit") return new Response("", { status: 403 });
+        if (failure === "timeout") throw new DOMException("private token", "TimeoutError");
+        if (failure === "network") throw new Error("net::ERR_CONNECTION_RESET private token");
+        return new Response("<html>proxy error</html>");
+      },
+    });
+    const state = await service.check();
+    assert.equal(state.status, "available", failure);
+    assert.equal(state.latestVersion, "2.1.3");
+    assert.equal(state.error, "");
+    assert.deepEqual(requests.map(({ url }) => url), [
+      "https://api.github.com/repos/xujack97121/-/releases/latest", RELEASE_PAGE,
+    ]);
+    for (const { options } of requests) {
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.headers?.Authorization, undefined);
+    }
+    assert.equal(requests[0].options.cache, "no-store");
+    assert.ok(requests[0].options.signal instanceof AbortSignal);
+    assert.equal(requests[1].options.headers["Cache-Control"], "no-cache");
+    assert.equal(requests[1].options.method, "HEAD");
+    assert.equal(requests[1].options.redirect, "manual");
+    await service.download();
+    await service.install();
+    assert.deepEqual(calls, [], "Fallback must not run an unsigned installer");
+  }
+});
+
+test("fallback accepts only stable release tags from the pinned HTTPS repository", async (t) => {
+  for (const location of [
+    "https://untrusted.test/xujack97121/-/releases/tag/v2.1.3",
+    "http://github.com/xujack97121/-/releases/tag/v2.1.3",
+    "https://github.com/another/repo/releases/tag/v2.1.3",
+    "https://user:secret@github.com/xujack97121/-/releases/tag/v2.1.3",
+    "https://github.com/xujack97121/-/releases/tag/v2.1.3-beta",
+    "https://github.com/xujack97121/-/releases/tag/v2.1.3?token=secret",
+    "https://github.com/xujack97121/-/releases/tag/v2.1.3#secret",
+    null,
+  ]) {
+    const { service } = await fixture(t, {
+      platform: "darwin",
+      fetchImpl: async (url) => url === RELEASE_PAGE
+        ? new Response(null, { status: 302, headers: location ? { Location: location } : {} })
+        : new Response("", { status: 503 }),
+    });
+    const state = await service.check();
+    assert.equal(state.status, "error", String(location));
+    assert.equal(state.latestVersion, "");
+    assert.doesNotMatch(state.error, /secret|untrusted|another/);
+  }
+});
+
+test("fallback does not mistake equal or older versions for an available update", async (t) => {
+  for (const version of ["2.0.6", "2.0.5"]) {
+    const { service } = await fixture(t, {
+      platform: "darwin",
+      fetchImpl: async (url) => url === RELEASE_PAGE
+        ? new Response(null, { status: 302, headers: { Location: `/xujack97121/-/releases/tag/v${version}` } })
+        : new Response("", { status: 429 }),
+    });
+    const state = await service.check();
+    assert.equal(state.status, "current");
+    assert.equal(state.latestVersion, "");
+  }
+});
+
+test("failed manual checks explain the failure, do not expose diagnostics, and can be retried", async (t) => {
+  for (const [error, expected] of [
+    [new DOMException("private token", "TimeoutError"), /超时/],
+    [new Error("net::ERR_NAME_NOT_RESOLVED private token"), /解析/],
+    [new Error("net::ERR_PROXY_CONNECTION_FAILED private token"), /代理/],
+    [new Error("net::ERR_CONNECTION_RESET private token"), /网络/],
+  ]) {
+    let fail = true;
+    const { service } = await fixture(t, {
+      platform: "darwin",
+      fetchImpl: async () => {
+        if (fail) throw error;
+        return new Response(JSON.stringify({ tag_name: "v2.1.3", draft: false, prerelease: false }));
+      },
+    });
+    const state = await service.check();
+    assert.equal(state.status, "error");
+    assert.match(state.error, expected);
+    assert.doesNotMatch(state.error, /private|token|net::/);
+    fail = false;
+    assert.equal((await service.check()).status, "available");
+    assert.equal(service.getState().error, "");
+  }
+});
+
+test("manual checks share one operation even while waiting for the fallback", async (t) => {
+  let finish;
+  const urls = [];
+  const { service } = await fixture(t, {
+    platform: "darwin",
+    fetchImpl: async (url) => {
+      urls.push(url);
+      if (url !== RELEASE_PAGE) return new Response("", { status: 403 });
+      return new Promise((resolve) => { finish = () => resolve(new Response(null, {
+        status: 302, headers: { Location: "/xujack97121/-/releases/tag/v2.1.3" },
+      })); });
+    },
+  });
+  const first = service.check();
+  for (let i = 0; i < 10 && !finish; i++) await Promise.resolve();
+  assert.ok(finish);
+  await service.check();
+  assert.equal(urls.length, 2);
+  finish();
+  assert.equal((await first).status, "available");
+});
+
+test("manual check HTTP failures have actionable messages without enabling installation", async (t) => {
+  for (const [status, expected] of [[403, /限制/], [429, /限制/], [503, /暂不可用/]]) {
+    const { service, calls } = await fixture(t, {
+      platform: "darwin", fetchImpl: async () => new Response("", { status }),
+    });
+    const state = await service.check();
+    assert.equal(state.status, "error");
+    assert.match(state.error, expected);
+    await service.install();
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("failure to open the browser is visible without discarding a downloaded update", async (t) => {
+  const { service } = await fixture(t, {
+    openRelease: async () => { throw new Error("C:/private/path secret"); },
+  });
+  await service.check();
+  await service.download();
+  const state = await service.openDownloadPage();
+  assert.equal(state.status, "downloaded");
+  assert.match(state.error, /无法打开默认浏览器/);
+  assert.doesNotMatch(state.error, /private|secret/);
 });

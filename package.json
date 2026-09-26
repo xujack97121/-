@@ -1,6 +1,6 @@
 {
   "name": "xiaohongshu-multi-account-collector",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "支持多账号隔离登录的小红书公开数据采集与笔记操作工作台",
   "author": "xujack",
   "private": true,
@@ -23,6 +23,7 @@
     "test:backend": "node tests/backend/ai-service.test.cjs && node --test tests/backend/ai-stream-compatibility.test.cjs && node tests/backend/preload-ai-routing.test.cjs && node tests/backend/renderer-url.test.cjs && node tests/backend/data-dashboard-window.test.cjs && node tests/backend/desktop-normalizer.test.cjs && node tests/backend/capture-lifecycle.test.cjs && node tests/backend/account-registry.test.cjs && node tests/backend/preload-account-routing.test.cjs && node tests/backend/app-icon.test.cjs",
     "test:electron-stream": "electron tests/backend/ai-stream-electron.test.cjs",
     "test:electron-updates": "electron tests/backend/app-updates-electron.test.cjs",
+    "test:electron-update-check": "electron tests/backend/app-update-check-electron.test.cjs",
     "test:electron-douyin": "electron tests/backend/douyin-electron.test.cjs",
     "test:electron-navigation": "electron tests/backend/browser-navigation-electron.test.cjs",
     "test:packaging": "node tests/packaging/installer-config.test.cjs"

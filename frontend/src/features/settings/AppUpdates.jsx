@@ -43,20 +43,20 @@ export function AppUpdatesSettings({ updates }) {
   const message = !enabled ? "在线更新仅在桌面安装版可用"
     : ({
       idle: "尚未检查",
-      checking: "正在检查更新",
+      checking: state.checkSource === "release-page" ? "正在通过官方发布页检查" : "正在检查更新",
       current: "已是最新版本",
       available: `发现新版本 v${state.latestVersion}`,
       downloading: `正在下载 v${state.latestVersion}`,
       downloaded: `v${state.latestVersion} 已下载，等待安装`,
       installing: "正在启动安装程序",
-      error: "更新未完成",
+      error: "未能完成更新检查或更新操作",
     }[status] || "尚未检查");
   return (
     <section className="settings-updates" aria-labelledby="settings-updates-heading">
       <div className="settings-row">
         <div><strong id="settings-updates-heading">软件更新</strong><small>当前版本 v{state.currentVersion}</small></div>
         <button className="button" type="button" disabled={!enabled || busy || status === "downloaded"} onClick={() => invoke("check")}>
-          <IconRefresh size={15} className={status === "checking" ? "spin" : ""} />{status === "checking" ? "检查中" : "检查更新"}
+          <IconRefresh size={15} aria-hidden="true" className={status === "checking" ? "spin" : ""} />{status === "checking" ? "检查中" : status === "error" ? "重试检查" : "检查更新"}
         </button>
       </div>
       <p className="settings-update-status" role="status">{message}</p>
@@ -67,9 +67,9 @@ export function AppUpdatesSettings({ updates }) {
       <div className="settings-update-actions">
         {status === "available" && mode === "automatic" && <button className="button primary" type="button" disabled={busy} onClick={() => invoke("download")}><IconDownload size={15} />下载更新</button>}
         {status === "downloaded" && <button className="button primary" type="button" disabled={busy} onClick={() => invoke("install")}><IconRotateClockwise size={15} />安装并重启</button>}
-        {enabled && <button className="button" type="button" disabled={pending} onClick={() => invoke("openRelease")}><IconExternalLink size={15} />{mode === "manual" ? "前往下载新版" : "GitHub 发布页"}</button>}
+        {enabled && <button className={`button${mode === "manual" && ["available", "error"].includes(status) ? " primary" : ""}`} type="button" title="打开 GitHub 官方发布页" disabled={pending} onClick={() => invoke("openRelease")}><IconExternalLink size={15} aria-hidden="true" />{mode === "manual" ? "前往下载新版" : "GitHub 发布页"}</button>}
       </div>
-      {mode === "manual" && <p className="settings-update-status">当前平台使用安装包更新。</p>}
+      {mode === "manual" && <p className="settings-update-status">当前平台使用安装包更新，不会自动安装。</p>}
       <label className="settings-row">
         <strong>自动检查更新</strong>
         <input type="checkbox" role="switch" aria-label="自动检查更新" disabled={!enabled || pending} checked={Boolean(state.autoCheck)} onChange={(event) => invoke("setPreferences", { autoCheck: event.target.checked })} />
