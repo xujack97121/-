@@ -1,4 +1,12 @@
-# 多平台采集工作台 v2.1.1
+# 多平台采集工作台 v2.1.2
+
+## 采集误停修复
+
+- 修复账号页面的内嵌 iframe 重定向被误判为主页面离开平台，导致采集立即停止的问题；小红书和抖音均适用。
+- 正常内嵌页面跳转不再中断采集或清空待处理响应；主页面真正跳到平台外仍会被阻止并停止任务。
+- 兼容 Electron 新版导航事件字段；真正跨平台的停止提示仅显示目标域名，不暴露地址中的查询令牌。
+- 增加 Windows/macOS 的真实 Electron 隔离回归：平台内主页面重定向、内嵌跨域重定向后继续采集、主页面跨平台跳转保护。
+- 未访问用户账号或本地会话数据；目标电脑的真实账号仍需升级后复测。
 
 ## 初始化修复
 
@@ -45,8 +53,8 @@
 
 ## 安装包
 
-- Windows x64：`xiaohongshu-multi-account-2.1.1-x64.exe`。
-- macOS Apple Silicon：`xiaohongshu-multi-account-2.1.1-arm64.dmg`；当前通过发布页下载安装。
+- Windows x64：`xiaohongshu-multi-account-2.1.2-x64.exe`。
+- macOS Apple Silicon：`xiaohongshu-multi-account-2.1.2-arm64.dmg`；当前通过发布页下载安装。
 - 安装包不包含用户的账号会话、Cookie、采集结果或 AI 密钥。
 - Windows 安装包尚未配置代码签名，可能显示“未知发布者”。
 

@@ -100,7 +100,7 @@ test("Old XHS sessions stay unchanged; new Douyin sessions persist independently
   }
 });
 
-function harness() {
+function harness(platform = "douyin") {
   const filename = path.resolve(__dirname, "../../backend/main.cjs");
   const localRequire = createRequire(filename);
   const messages = [];
@@ -111,15 +111,15 @@ function harness() {
   const sandbox = {
     require: (name) => name === "electron" ? electron : localRequire(name),
     __dirname: path.dirname(filename), process, Buffer, URL, Set, Map, console,
-    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
+    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}, testPlatform: platform,
   };
   vm.createContext(sandbox);
   vm.runInContext(`${fs.readFileSync(filename, "utf8")}
     globalThis.testApi = { startTask, scrollOneStep, wireBrowserEvents, readResponseBody, makeCaptureState, publishCapturePayload, attachNetworkCapture };
     mainWindow = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (channel, payload) => testMessages.push({ channel, payload }) } };
-    accountRegistry = { get: id => ({ id, platform: 'douyin' }), list: () => [] };
+    accountRegistry = { get: id => ({ id, platform: testPlatform }), list: () => [] };
   `, Object.assign(sandbox, { testMessages: messages }), { filename });
-  let url = "https://www.douyin.com/";
+  let url = platformHome(platform);
   const contents = Object.assign(new EventEmitter(), {
     isDestroyed: () => false, getURL: () => url, getTitle: () => "", isLoading: () => false,
     setBackgroundThrottling() {}, setWindowOpenHandler() {},
@@ -128,12 +128,75 @@ function harness() {
     debugger: Object.assign(new EventEmitter(), { isAttached: () => true, sendCommand: async () => ({ body: JSON.stringify({ comments: [row("7530000000000000001")] }) }) }),
   });
   const context = {
-    id: "mock-douyin-account", platform: "douyin", capture: sandbox.testApi.makeCaptureState(),
+    id: `mock-${platform}-account`, platform, capture: sandbox.testApi.makeCaptureState(),
     operation: { active: false }, view: { webContents: contents }, navigation: {}, pendingResponses: new Map(),
     identity: { state: "unknown" },
   };
   return { ...sandbox.testApi, context, contents, messages, setUrl: (value) => { url = value; } };
 }
+
+test("Embedded redirects do not stop either platform or discard its pending capture responses", () => {
+  for (const platform of ["xhs", "douyin"]) {
+    for (const modern of [false, true]) {
+      const h = harness(platform);
+      h.wireBrowserEvents(h.context);
+      h.context.capture.active = true;
+      h.context.capture.runId = "redirect-fixture";
+      h.context.pendingResponses.set("pending", { runId: "redirect-fixture" });
+      let prevented = false;
+      const event = { preventDefault() { prevented = true; } };
+      const url = "https://embedded.example/ready?token=private-fixture";
+      if (modern) {
+        Object.assign(event, { url, isMainFrame: false });
+        h.contents.emit("will-redirect", event);
+      } else h.contents.emit("will-redirect", event, url, false, false);
+      assert.equal(prevented, false, `${platform}: let the embedded page load normally`);
+      assert.equal(h.context.capture.active, true);
+      assert.equal(h.context.capture.runId, "redirect-fixture");
+      assert.equal(h.context.pendingResponses.has("pending"), true);
+      assert.equal(h.messages.some((item) => item.payload.phase === "stopped"), false);
+    }
+  }
+});
+
+test("Main-frame redirects accept both current event details and legacy arguments without weakening platform boundaries", () => {
+  for (const platform of ["xhs", "douyin"]) {
+    for (const modern of [false, true]) {
+      for (const allowed of [false, true]) {
+        const h = harness(platform);
+        h.wireBrowserEvents(h.context);
+        h.context.capture.active = true;
+        h.context.capture.runId = "main-redirect-fixture";
+        let prevented = false;
+        const url = allowed ? `${platformHome(platform)}?fixture=allowed`
+          : "https://outside.example/login?token=private-fixture";
+        const event = { preventDefault() { prevented = true; } };
+        if (modern) {
+          Object.assign(event, { url, isMainFrame: true });
+          h.contents.emit("will-redirect", event);
+        } else h.contents.emit("will-redirect", event, url, false, true);
+        assert.equal(prevented, !allowed);
+        assert.equal(h.context.capture.active, allowed);
+        if (!allowed) {
+          const stopped = h.messages.find((item) => item.channel === "collector:status" && item.payload.phase === "stopped");
+          assert.match(stopped.payload.message, /outside\.example/);
+          assert.equal(stopped.payload.message.includes("private-fixture"), false, "Do not display URL tokens");
+        }
+      }
+    }
+  }
+});
+
+test("Unknown frame metadata remains fail-closed for external redirects", () => {
+  const h = harness("xhs");
+  h.wireBrowserEvents(h.context);
+  h.context.capture.active = true;
+  h.context.capture.runId = "unknown-frame";
+  let prevented = false;
+  h.contents.emit("will-redirect", { preventDefault() { prevented = true; } }, "https://outside.example/");
+  assert.equal(prevented, true);
+  assert.equal(h.context.capture.active, false);
+});
 
 test("Navigation starts on the intended video; leaving it stops the run, and stale responses cannot enter a new run", async () => {
   const h = harness();

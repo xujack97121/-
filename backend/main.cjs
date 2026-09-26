@@ -707,10 +707,17 @@ function wireBrowserEvents(context) {
   contents.on("will-navigate", (event, url) => {
     if (!isPlatformPage(url, context.platform)) { event.preventDefault(); openSafeExternal(url); }
   });
-  contents.on("will-redirect", (event, url) => {
-    if (!isPlatformPage(url, context.platform)) {
+  contents.on("will-redirect", (event, url, _isInPlace, isMainFrame) => {
+    // Embedded redirects do not navigate the account's top-level page.
+    if ((event.isMainFrame ?? isMainFrame) === false) return;
+    const destination = event.url ?? url;
+    if (!isPlatformPage(destination, context.platform)) {
       event.preventDefault();
-      if (context.capture.active) stopAutoScroll(context, "页面跳转到当前平台外，采集已停止");
+      if (context.capture.active) {
+        let site = "未知站点";
+        try { site = new URL(destination).hostname || "非网页地址"; } catch { /* do not display URL tokens */ }
+        stopAutoScroll(context, `页面尝试跳转至平台外（${site}），已阻止并停止采集`);
+      }
     }
   });
   contents.debugger.on("detach", () => {

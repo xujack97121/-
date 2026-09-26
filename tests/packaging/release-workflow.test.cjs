@@ -7,6 +7,8 @@ const workflow = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/re
 assert.deepEqual(workflow.on.push.branches, ["main"]);
 assert.equal(workflow.concurrency["cancel-in-progress"], false);
 const jobs = workflow.jobs;
+for (const platform of ["windows", "macos"])
+  assert.ok(jobs[platform].steps.some((step) => step.run === "npm run test:electron-navigation"));
 assert.match(jobs.windows.steps.map((step) => step.run || "").join("\n"), /verify-update-assets/);
 const assets = jobs.windows.steps.find((step) => step.uses?.startsWith("actions/upload-artifact")).with.path;
 assert.match(assets, /latest\.yml/);
