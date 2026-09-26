@@ -32,6 +32,7 @@ import { AnalyticsPage } from "../features/analytics/AnalyticsPage.jsx";
 import { SettingsDialog } from "../features/settings/SettingsDialog.jsx";
 import { useAppUpdates } from "../features/settings/AppUpdates.jsx";
 import { DataDashboard } from "../features/dashboard/DataDashboard.jsx";
+import { platformOf, platformLabel, platformHome } from "../features/platforms/content-platforms.js";
 
 const demoNotes = [
   { id: "65a2-demo-01", author: "张六千", authorId: "653500d40000", title: "没钱还想创业？互联网是年轻人的第一桶金", link: "https://www.xiaohongshu.com/explore/65a2-demo-01", likes: 2529, type: "视频", time: "2小时前", source: "搜索" },
@@ -106,6 +107,7 @@ function normalizeAccount(raw, index = 0) {
   return {
     ...raw,
     id,
+    platform: platformOf(raw),
     name: String(raw?.displayName ?? raw?.name ?? raw?.profileName ?? raw?.nickname ?? raw?.label ?? `账号 ${index + 1}`),
     nickname: String(raw?.profileName ?? raw?.nickname ?? raw?.displayName ?? ""),
     avatarUrl: raw?.avatarUrl ?? raw?.avatar ?? "",
@@ -226,7 +228,8 @@ function dashboardRow(account = {}, workspace = {}, runtime = {}) {
     stateLabel = operationActive ? "自动化操作中" : "自动化队列等待中";
   } else if (captureActive) {
     state = "capture";
-    stateLabel = DASHBOARD_CAPTURE_LABELS[account.capture?.kind] || "采集中";
+    stateLabel = account.platform === "douyin" && account.capture?.kind === "comments"
+      ? "视频评论采集中" : DASHBOARD_CAPTURE_LABELS[account.capture?.kind] || "采集中";
   } else if (operationActive) {
     state = "operation";
     stateLabel = "笔记操作中";
@@ -309,6 +312,7 @@ function asQueueTask(note) {
     title: note.title || "未命名笔记",
     author: note.author || "",
     link: note.link,
+    platform: platformOf(note),
     selected: true,
     status: "待执行",
     likeStatus: "待执行",
@@ -331,6 +335,7 @@ function mergeQueue(previous, notes) {
 }
 
 function commentIdentity(comment) {
+  if (comment?.platform === "douyin" && comment.id) return ["douyin", comment.noteId, comment.id].join("\u0000");
   return [comment?.noteId, comment?.authorId || comment?.nickname, comment?.content]
     .map((value) => String(value || "").trim())
     .join("\u0000");
@@ -432,15 +437,17 @@ function parseCsv(text) {
   return lines.slice(1).map((line) => Object.fromEntries(headers.map((header, index) => [header, parseLine(line)[index] ?? ""])));
 }
 
-function createDefaultWorkspace(realMode) {
+function createDefaultWorkspace(realMode, platform = "xhs") {
+  const empty = realMode || platform === "douyin";
   return {
-    notes: realMode ? [] : demoNotes,
-    comments: realMode ? [] : demoComments,
+    platform,
+    notes: empty ? [] : demoNotes,
+    comments: empty ? [] : demoComments,
     stats: { captures: 0, lastUrl: realMode ? "等待真实页面响应" : "演示数据", updatedAt: Date.now() },
-    ui: { activeTab: "search", keyword: "创业", currentUrl: HOME_URL, live: false, muted: true },
+    ui: { activeTab: platform === "douyin" ? "comments" : "search", keyword: platform === "douyin" ? "" : "创业", currentUrl: platformHome(platform), live: false, muted: true },
     search: { limit: 100, minLikes: 0, type: "全部", timeRange: "all", selectedIds: realMode ? [] : [demoNotes[3].id] },
     author: { url: PROFILE_URL, tasks: [], selectedIds: [], intervalSeconds: 3 },
-    commentsPanel: { url: EXPLORE_URL, region: "", contains: "", timeRange: "all", unique: true },
+    commentsPanel: { url: platform === "douyin" ? "" : EXPLORE_URL, region: "", contains: "", timeRange: "all", unique: true },
     operation: {
       url: EXPLORE_URL,
       commentText: "支持支持",
@@ -457,7 +464,7 @@ function createDefaultWorkspace(realMode) {
 }
 
 function normalizeWorkspace(value, realMode) {
-  const base = createDefaultWorkspace(realMode);
+  const base = createDefaultWorkspace(realMode, platformOf(value));
   const workspace = value && typeof value === "object" ? value : {};
   return {
     ...base,
@@ -521,7 +528,7 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
   const updateWorkspace = useCallback((accountId, updater) => {
     if (!accountId) return;
     setWorkspaces((previous) => {
-      const current = previous[accountId] ?? createDefaultWorkspace(realMode);
+      const current = previous[accountId] ?? createDefaultWorkspace(realMode, platformOf(accountsRef.current.find((account) => account.id === accountId)));
       const nextWorkspace = typeof updater === "function" ? updater(current) : { ...current, ...updater };
       if (nextWorkspace === current) return previous;
       return { ...previous, [accountId]: nextWorkspace };
@@ -537,10 +544,11 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
       const next = { ...previous };
       for (const [index, accountId] of accountIds.entries()) {
         if (next[accountId]) continue;
-        const legacy = !migrationAttemptedRef.current && index === 0 && !Object.keys(previous).length
+        const platform = platformOf(accounts.find((account) => account.id === accountId));
+        const legacy = platform === "xhs" && !migrationAttemptedRef.current && index === 0 && !Object.keys(previous).length
           ? readLegacyWorkspace(realMode, desktopMode)
           : null;
-        next[accountId] = legacy ?? createDefaultWorkspace(realMode);
+        next[accountId] = legacy ?? createDefaultWorkspace(realMode, platform);
         changed = true;
       }
       migrationAttemptedRef.current = true;
@@ -562,6 +570,8 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
       // Multi-account events without an owner are discarded instead of contaminating
       // whichever account happens to be visible when the event arrives.
       if (!accountId || !String(payload.runId || "").trim() || payload.kind === "passive") return;
+      const account = accountsRef.current.find((item) => item.id === accountId);
+      if (!account || payload.platform && payload.platform !== platformOf(account)) return;
       updateWorkspace(accountId, (workspace) => {
         const notes = mergeNotes(workspace.notes, payload.notes, 5000);
         const comments = mergeComments(workspace.comments, payload.comments, 10000);
@@ -604,7 +614,8 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
     return () => chrome.storage.onChanged.removeListener(listener);
   }, [activeAccountId, extensionMode, updateWorkspace]);
 
-  const workspace = workspaces[activeAccountId] ?? createDefaultWorkspace(realMode);
+  const platform = platformOf(accounts.find((account) => account.id === activeAccountId));
+  const workspace = workspaces[activeAccountId] ?? createDefaultWorkspace(realMode, platform);
   const setNotes = useCallback((value) => updateWorkspace(activeAccountId, (current) => ({
     ...current,
     notes: typeof value === "function" ? value(current.notes) : value,
@@ -652,6 +663,7 @@ function useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAc
       desktopMode,
       extensionMode,
       realMode,
+      platform,
       notes: workspace.notes,
       comments: workspace.comments,
       stats: workspace.stats,
@@ -726,7 +738,8 @@ function AccountBar({ accounts, activeAccountId, desktopMode, dashboardOpen, onD
         {accounts.map((account) => {
           const active = account.id === activeAccountId;
           const phaseLabel = loginPhaseLabel(account, desktopMode);
-          const detailLabel = account.nickname && account.nickname !== account.name ? `${account.nickname} · ${phaseLabel}` : phaseLabel;
+          const identityLabel = account.nickname && account.nickname !== account.name ? `${account.nickname} · ${phaseLabel}` : phaseLabel;
+          const detailLabel = account.platform === "douyin" ? `抖音 · ${identityLabel}` : identityLabel;
           return (
             <button
               className={`account-chip ${active ? "active" : ""}`}
@@ -901,6 +914,7 @@ function AccountsDashboard({ rows, summary, desktopMode, onOpenAccount, onOpenDa
 
 function AccountDialog({ dialog, busy, onCancel, onSubmit }) {
   const [value, setValue] = useState(dialog.mode === "rename" ? dialog.account?.name ?? "" : dialog.suggestedName ?? "");
+  const [platform, setPlatform] = useState("xhs");
   useEffect(() => {
     const onKeyDown = (event) => { if (event.key === "Escape" && !busy) onCancel(); };
     window.addEventListener("keydown", onKeyDown);
@@ -908,11 +922,11 @@ function AccountDialog({ dialog, busy, onCancel, onSubmit }) {
   }, [busy, onCancel]);
 
   const deleting = dialog.mode === "remove";
-  const title = deleting ? "移除账号" : dialog.mode === "rename" ? "重命名账号" : "添加小红书账号";
+  const title = deleting ? "移除账号" : dialog.mode === "rename" ? "重命名账号" : "添加账号";
   const submit = (event) => {
     event.preventDefault();
     if (!deleting && !value.trim()) return;
-    onSubmit(value.trim());
+    onSubmit(value.trim(), platform);
   };
   return (
     <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
@@ -923,8 +937,9 @@ function AccountDialog({ dialog, busy, onCancel, onSubmit }) {
           <p>确认移除“{dialog.account?.name}”吗？该账号的独立登录会话、本地采集结果和任务队列都会被清除，其他账号不受影响。</p>
         ) : (
           <>
-            <p>{dialog.mode === "add" ? "将创建一个全新的独立登录空间，切换账号不会共享 Cookie。" : "名称只用于本机工作台识别，不会修改小红书昵称。"}</p>
-            <label>账号名称<input autoFocus maxLength="24" value={value} onChange={(event) => setValue(event.target.value)} placeholder="例如：品牌主账号" /></label>
+            <p>{dialog.mode === "add" ? "将创建独立登录空间，其他账号不受影响。" : "仅修改本机账号名称。"}</p>
+            {dialog.mode === "add" && <label>平台<select aria-label="账号平台" value={platform} disabled={busy} onChange={(event) => setPlatform(event.target.value)}><option value="xhs">小红书</option><option value="douyin">抖音 · 视频评论</option></select></label>}
+            <label>账号名称<input autoFocus disabled={busy} maxLength="24" value={value} onChange={(event) => setValue(event.target.value)} placeholder="例如：品牌主账号" /></label>
           </>
         )}
         <div className="dialog-actions">
@@ -937,24 +952,25 @@ function AccountDialog({ dialog, busy, onCancel, onSubmit }) {
 }
 
 function BrowserPane({ account, keyword, currentUrl, live, muted, extensionMode, desktopMode, onHome, onReload, onMuted }) {
+  const site = platformLabel(account);
   const browserMode = desktopMode ? "桌面浏览器" : extensionMode ? "当前浏览器" : "不可采集";
   const accountLabel = account?.name || (extensionMode ? "当前浏览器" : "预览账号");
   return (
     <section className="browser-pane" aria-label="浏览器预览">
       <div className="browser-toolbar">
-        <span className="browser-label" title={`${accountLabel} · ${browserMode}`}><StatusDot active={live || account?.loginPhase === "logged-in"} phase={live ? "running" : account?.loginPhase} /><span>{desktopMode ? "小红书" : "网页预览"}</span><em>{!desktopMode && !extensionMode ? "演示" : ""}</em></span>
+        <span className="browser-label" title={`${accountLabel} · ${browserMode}`}><StatusDot active={live || account?.loginPhase === "logged-in"} phase={live ? "running" : account?.loginPhase} /><span>{desktopMode ? site : "网页预览"}</span><em>{!desktopMode && !extensionMode ? "演示" : ""}</em></span>
         <div className="browser-actions">
-          <button type="button" className="icon-button" onClick={onHome} title="返回小红书首页" aria-label="返回小红书首页"><IconHome size={16} stroke={1.8} /></button>
+          <button type="button" className="icon-button" onClick={onHome} title={`返回${site}首页`} aria-label={`返回${site}首页`}><IconHome size={16} stroke={1.8} /></button>
           <label className="mute-check"><input type="checkbox" checked={muted} onChange={(event) => onMuted(event.target.checked)} /><IconVolume size={15} stroke={1.8} /> 静音</label>
           <div className="address-field" title={currentUrl}>{currentUrl}</div>
           <button type="button" className="icon-button" onClick={onReload} title="刷新嵌入页面" aria-label="刷新嵌入页面"><IconRefresh size={16} stroke={1.8} /></button>
         </div>
       </div>
       <div className={`browser-preview ${desktopMode ? "desktop-live" : ""}`}>
-        <img src={`${import.meta.env.BASE_URL}assets/xhs-preview-apricot.png`} alt="杏桃柔和分区设计中的小红书内容预览" />
+        {account?.platform !== "douyin" && <img src={`${import.meta.env.BASE_URL}assets/xhs-preview-apricot.png`} alt="杏桃柔和分区设计中的小红书内容预览" />}
         <div className="preview-caption">
-          <strong>{keyword || "创业"}</strong>
-          <span>{desktopMode ? "真实小红书页面正在载入" : extensionMode ? "真实页面在当前 Chrome 标签中打开" : "网页预览不具备采集权限，请运行桌面版"}</span>
+          <strong>{account?.platform === "douyin" ? "抖音" : keyword || "创业"}</strong>
+          <span>{desktopMode ? `真实${site}页面正在载入` : extensionMode ? "真实页面在当前 Chrome 标签中打开" : "网页预览不具备采集权限，请运行桌面版"}</span>
         </div>
       </div>
       <div className="browser-foot">
@@ -1482,7 +1498,9 @@ export function App() {
   const { workspaces, workspace, updateWorkspace, removeWorkspace, data } = useCollectorWorkspaces({ desktopMode, extensionMode, accounts, activeAccountId });
   const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? accounts[0] ?? null;
   const accountName = activeAccount?.name || "当前账号";
-  const activeTab = workspace.ui.activeTab;
+  const platform = platformOf(activeAccount);
+  const activeTab = platform === "douyin" ? "comments" : workspace.ui.activeTab;
+  const visibleTabs = platform === "douyin" ? [{ id: "comments", label: "视频评论", icon: IconMessageCircle }] : tabs;
   const keyword = workspace.ui.keyword;
   const currentUrl = workspace.ui.currentUrl;
   const live = Boolean(workspace.ui.live);
@@ -1652,12 +1670,12 @@ export function App() {
     }
   };
 
-  const submitAccountDialog = async (name) => {
+  const submitAccountDialog = async (name, newPlatform = "xhs") => {
     if (!accountApi || !accountDialog) return;
     setAccountBusy(true);
     try {
       if (accountDialog.mode === "add") {
-        const result = await accountApi.add({ name });
+        const result = await accountApi.add({ name, platform: newPlatform });
         const createdId = result?.accountId ?? result?.id ?? result?.account?.id;
         const refreshed = await refreshAccounts();
         if (createdId) {
@@ -1686,7 +1704,7 @@ export function App() {
 
   const goHome = async () => {
     if (data.desktopMode) await callDesktop("home", activeAccountId);
-    else setCurrentUrl(HOME_URL);
+    else setCurrentUrl(platformHome(platform));
   };
   const reloadBrowser = async () => {
     if (data.desktopMode) await callDesktop("reload", activeAccountId);
@@ -1711,7 +1729,7 @@ export function App() {
         setCurrentUrl(note.link);
       }
       setLive(false);
-      panelNotify("已在左侧打开目标笔记。", "success");
+      panelNotify(`已在左侧打开目标${platform === "douyin" ? "视频" : "笔记"}。`, "success");
     } catch (error) {
       panelNotify(`打开笔记失败：${error.message}`, "error");
     }
@@ -1723,7 +1741,7 @@ export function App() {
         if (accountId && accountId !== activeAccountId && typeof accountApi?.switch === "function") await accountApi.switch(accountId);
         if (accountId) setActiveAccountId(accountId);
         const result = await callDesktop("openNote", accountId || activeAccountId, { id: note.id, link: note.link, title: note.title });
-        setWorkspaceSection("ui", { activeTab: "search", currentUrl: result.url, live: false }, accountId || activeAccountId);
+        setWorkspaceSection("ui", { activeTab: platformOf(accountsRef.current.find((item) => item.id === (accountId || activeAccountId))) === "douyin" ? "comments" : "search", currentUrl: result.url, live: false }, accountId || activeAccountId);
       } else {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab?.id) throw new Error("没有可用的小红书标签页");
@@ -1745,11 +1763,11 @@ export function App() {
   const collectNoteComments = async (note) => {
     const accountId = activeAccountId;
     if (commentStartLocks.current.has(accountId)) return;
-    const link = commentNoteLink(note.link);
-    if (!link) { panelNotify("请输入完整的小红书笔记链接。", "error"); return; }
+    const link = commentNoteLink(note.link, platform);
+    if (!link) { panelNotify(platform === "douyin" ? "请输入完整抖音视频链接：https://www.douyin.com/video/视频ID；短链接请先在浏览器打开后复制完整地址。" : "请输入完整的小红书笔记链接。", "error"); return; }
     const id = commentNoteId({ ...note, link });
     if (activeCommentNoteId === id) { setActiveTab("comments"); return; }
-    const task = { ...asQueueTask({ ...note, id, link }), status: data.realMode ? "正在打开" : "等待桌面版", runId: "" };
+    const task = { ...asQueueTask({ ...note, id, link, platform, title: note.title || (platform === "douyin" ? `视频 ${id}` : "未命名笔记") }), status: data.realMode ? "正在打开" : "等待桌面版", runId: "" };
     commentStartLocks.current.add(accountId);
     setCommentStartingByAccount((previous) => ({ ...previous, [accountId]: id }));
     updateWorkspace(accountId, (current) => ({
@@ -1776,7 +1794,7 @@ export function App() {
         notifyForAccount(accountId, "已加入评论卡片。真实评论采集需在桌面版中运行。", "info");
         return;
       }
-      notifyForAccount(accountId, "已启动该笔记的评论采集，结果将自动归入对应卡片。", "success");
+      notifyForAccount(accountId, platform === "douyin" ? "已开始监听该视频，请在左侧打开评论区。" : "已启动该笔记的评论采集，结果将自动归入对应卡片。", "success");
     } catch (error) {
       updateTask({ status: "启动失败" });
       notifyForAccount(accountId, `评论采集启动失败：${error.message}`, "error");
@@ -1829,7 +1847,7 @@ export function App() {
   return (
     <main className={`app-shell ${analysisOpen ? "analysis-view" : ""} ${dashboardOpen ? "dashboard-open" : ""}`}>
       <header className="titlebar">
-        <div className="brand-lockup" title={`小红书多账号采集工作台 v${__APP_VERSION__}`}><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/ai-collector-icon.png`} alt="AI 采集" /><strong>小红书采集工作台</strong><span className="app-version" aria-label={`软件版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>{["available", "downloading", "downloaded"].includes(updates.state.status) && <button className="icon-button app-update-notice" type="button" title={updates.state.status === "downloaded" ? "更新已下载" : "发现新版本"} aria-label="查看软件更新" onClick={() => setSettingsTab("general")}><IconDownload size={15} /></button>}</div>
+        <div className="brand-lockup" title={`多平台采集工作台 v${__APP_VERSION__}`}><img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/ai-collector-icon.png`} alt="AI 采集" /><strong>{platform === "douyin" ? "抖音评论工作台" : "小红书采集工作台"}</strong><span className="app-version" aria-label={`软件版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>{["available", "downloading", "downloaded"].includes(updates.state.status) && <button className="icon-button app-update-notice" type="button" title={updates.state.status === "downloaded" ? "更新已下载" : "发现新版本"} aria-label="查看软件更新" onClick={() => setSettingsTab("general")}><IconDownload size={15} /></button>}</div>
         <AccountBar
           accounts={accounts}
           activeAccountId={activeAccountId}
@@ -1847,7 +1865,7 @@ export function App() {
           onSettings={() => setSettingsTab("ai")}
         />
       </header>
-      <nav className="tabs" aria-label="采集模块">{tabs.map(({ icon: Icon, ...tab }) => <button key={tab.id} type="button" className={activeTab === tab.id ? "active" : ""} aria-current={activeTab === tab.id ? "page" : undefined} disabled={tab.disabled || !activeAccountId} onClick={() => openWorkbenchTab(tab.id)}><Icon size={17} stroke={1.8} aria-hidden="true" />{tab.label}</button>)}</nav>
+      <nav className="tabs" aria-label="采集模块">{visibleTabs.map(({ icon: Icon, ...tab }) => <button key={tab.id} type="button" className={activeTab === tab.id ? "active" : ""} aria-current={activeTab === tab.id ? "page" : undefined} disabled={tab.disabled || !activeAccountId} onClick={() => openWorkbenchTab(tab.id)}><Icon size={17} stroke={1.8} aria-hidden="true" />{tab.label}</button>)}</nav>
       <div className="workspace">
         {!analysisOpen && <BrowserPane account={activeAccount} keyword={keyword} currentUrl={currentUrl} live={live} muted={muted} extensionMode={data.extensionMode} desktopMode={data.desktopMode} onHome={goHome} onReload={reloadBrowser} onMuted={setMuted} />}
         <section className="workbench">
@@ -1869,10 +1887,12 @@ export function App() {
             <div className="account-required"><IconUserCircle size={36} stroke={1.5} /><strong>先添加一个账号</strong><span>创建独立登录空间后，即可在左侧登录并开始采集。</span><button className="button primary" type="button" onClick={() => setAccountDialog({ mode: "add", suggestedName: "账号 1" })}>添加账号</button></div>
           ) : (
             <>
+              {platform !== "douyin" && <>
               <div className="panel-route" hidden={activeTab !== "safe"}><OperationPanel accountId={activeAccountId} data={data} state={workspace.operation} setState={(value) => setWorkspaceSection("operation", value)} tasks={operationTasks} setTasks={setOperationTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} /></div>
               <div className="panel-route" hidden={activeTab !== "search"}><SearchPanel accountId={activeAccountId} accountName={accountName} capture={activeAccount?.capture} data={data} state={workspace.search} setState={(value) => setWorkspaceSection("search", value)} keyword={keyword} setKeyword={setKeyword} setCurrentUrl={setCurrentUrl} live={live} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
               <div className="panel-route" hidden={activeTab !== "author"}><AuthorPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.author} setState={(value) => setWorkspaceSection("author", value)} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
-              <div className="panel-route" hidden={activeTab !== "comments"}><CommentsPanel key={activeAccountId} accountId={activeAccountId} accountName={accountName} data={data} state={workspace.commentsPanel} setState={(value) => setWorkspaceSection("commentsPanel", value)} tasks={commentTasks} onStart={collectNoteComments} onStop={stopCommentCollection} onOpen={openCommentNote} activeNoteId={activeCommentNoteId} starting={commentStarting} notify={panelNotify} downloadCsv={downloadCsv} active={activeTab === "comments"} settingsRevision={settingsRevision} onConfigure={() => setSettingsTab("ai")} /></div>
+              </>}
+              <div className="panel-route" hidden={activeTab !== "comments"}><CommentsPanel key={activeAccountId} accountId={activeAccountId} accountName={accountName} data={data} state={workspace.commentsPanel} setState={(value) => setWorkspaceSection("commentsPanel", value)} tasks={commentTasks} onStart={collectNoteComments} onStop={stopCommentCollection} onOpen={openCommentNote} activeNoteId={activeCommentNoteId} starting={commentStarting} notify={panelNotify} downloadCsv={downloadCsv} active={activeTab === "comments"} settingsRevision={settingsRevision} runtimeStatus={runtimeStatuses[activeAccountId]} onConfigure={() => setSettingsTab("ai")} /></div>
             </>
           ))}
         </section>

@@ -1,6 +1,9 @@
 import { commentMatchesTimeRange, parseCommentTime } from "./comment-time-filter.js";
+import { douyinVideoId } from "../platforms/content-platforms.js";
 
 export function commentNoteId(note = {}) {
+  const videoId = douyinVideoId(note.link);
+  if (videoId) return videoId;
   try {
     const url = new URL(note.link || "");
     if (url.protocol === "https:" && url.hostname === "www.xiaohongshu.com") {
@@ -11,10 +14,13 @@ export function commentNoteId(note = {}) {
   return String(note.id || "");
 }
 
-export function commentNoteLink(link) {
+export function commentNoteLink(link, platform) {
+  const videoId = douyinVideoId(link);
+  if (videoId) return platform !== "xhs" ? `https://www.douyin.com/video/${videoId}` : "";
+  if (platform === "douyin") return "";
   try {
     const url = new URL(link);
-    return url.protocol === "https:" && url.hostname === "www.xiaohongshu.com"
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && url.hostname === "www.xiaohongshu.com"
       && /^\/(?:explore|discovery\/item)\/[^/]+\/?$/.test(url.pathname) ? url.href : "";
   } catch {
     return "";
@@ -51,7 +57,7 @@ export function commentCollectionState(note, index, { starting = "", activeNoteI
   return { id, count, kind, label };
 }
 
-export function groupCommentNotes(notes = [], comments = [], tasks = []) {
+export function groupCommentNotes(notes = [], comments = [], tasks = [], platform = "xhs") {
   const metadata = new Map(notes.map((note) => [commentNoteId(note), note]));
   const groups = new Map();
   const ensure = (id, task) => {
@@ -60,10 +66,11 @@ export function groupCommentNotes(notes = [], comments = [], tasks = []) {
       const note = metadata.get(id);
       groups.set(key, {
         id: key,
-        title: note?.title || task?.title || (id ? `笔记 ${id}` : "未关联笔记的评论"),
+        platform,
+        title: note?.title || task?.title || (id ? `${platform === "douyin" ? "视频" : "笔记"} ${id}` : platform === "douyin" ? "未关联视频的评论" : "未关联笔记的评论"),
         author: note?.author || task?.author || "未知作者",
-        link: commentNoteLink(task?.link) || commentNoteLink(note?.link)
-          || (id ? `https://www.xiaohongshu.com/explore/${encodeURIComponent(id)}` : ""),
+        link: commentNoteLink(task?.link, platform) || commentNoteLink(note?.link, platform)
+          || (id ? platform === "douyin" ? `https://www.douyin.com/video/${encodeURIComponent(id)}` : `https://www.xiaohongshu.com/explore/${encodeURIComponent(id)}` : ""),
         task: task || null,
         comments: [],
       });

@@ -50,6 +50,7 @@ async function main() {
   await expectInvoke(() => exposedApi.accounts.list(), "accounts:list", undefined);
   await expectInvoke(() => exposedApi.addAccount("品牌主账号"), "accounts:add", { name: "品牌主账号" });
   await expectInvoke(() => exposedApi.createAccount({ name: "内容账号" }), "accounts:add", { name: "内容账号" });
+  await expectInvoke(() => exposedApi.createAccount({ name: "抖音账号", platform: "douyin" }), "accounts:add", { name: "抖音账号", platform: "douyin" });
   await expectInvoke(() => exposedApi.switchAccount("account-a"), "accounts:switch", { accountId: "account-a" });
   await expectInvoke(() => exposedApi.renameAccount("account-a", "新名称"), "accounts:rename", { accountId: "account-a", name: "新名称" });
   await expectInvoke(() => exposedApi.removeAccount("account-a", { clearData: false }), "accounts:remove", { accountId: "account-a", clearData: false });

@@ -148,15 +148,16 @@ export function CommentInsights({ accountId, group, collecting, onConfigure, act
     const count = analysis.dataset.coverage.commentCount;
     let origin = settings.baseUrl;
     try { origin = new URL(origin).origin; } catch { /* Show the configured destination verbatim. */ }
-    if (!window.confirm(`将本笔记的标题和 ${count} 条评论的关键文本发送至 ${origin}，分析情绪并额外生成舆情总结，可能产生模型调用费用。不附带昵称、用户 ID、时间、地区或登录信息。是否继续？`)) return;
+    const entity = group.platform === "douyin" ? "视频" : "笔记";
+    if (!window.confirm(`将本${entity}的标题和 ${count} 条评论的关键文本发送至 ${origin}，分析情绪并额外生成舆情总结，可能产生模型调用费用。不附带昵称、用户 ID、时间、地区或登录信息。是否继续？`)) return;
     const request = { id: `comment-${crypto.randomUUID()}`, fingerprint: analysis.dataset.fingerprint };
     requestRef.current = request;
     setPhase("running");
     setProgress({ phase: "preparing", totalRecords: analysis.dataset.records.length, analyzedRecords: 0, elapsedMs: 0 });
-    setMessage("正在分析本笔记评论");
+    setMessage(`正在分析本${entity}评论`);
     try {
       const raw = await api.analyze({
-        requestId: request.id, scopeLabel: "单篇笔记评论分析",
+        requestId: request.id, scopeLabel: group.platform === "douyin" ? "单个公开视频评论分析" : "单篇笔记评论分析",
         fingerprint: request.fingerprint, records: analysis.dataset.records,
         includePublicOpinion: true,
       });

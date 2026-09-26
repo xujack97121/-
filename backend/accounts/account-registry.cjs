@@ -1,6 +1,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const { accountPlatform } = require("../platform/content-platforms.cjs");
 
 const ACCOUNT_ID_PATTERN = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
 const DEFAULT_MAX_ACCOUNTS = 8;
@@ -14,15 +15,16 @@ function isAccountId(value) {
   return ACCOUNT_ID_PATTERN.test(String(value || ""));
 }
 
-function partitionForAccount(accountId) {
+function partitionForAccount(accountId, platform = "xhs") {
   if (!isAccountId(accountId)) throw new Error("账号 ID 无效");
-  return `persist:xhs-multi-account-${accountId.toLowerCase()}`;
+  return `persist:${accountPlatform(platform) === "douyin" ? "douyin" : "xhs"}-multi-account-${accountId.toLowerCase()}`;
 }
 
 function publicMetadata(record) {
   return {
     id: record.id,
     name: record.name,
+    platform: record.platform,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     lastActiveAt: record.lastActiveAt,
@@ -56,7 +58,8 @@ class AccountRegistry {
       const record = {
         id: String(candidate.id).toLowerCase(),
         name: normalizeAccountName(candidate.name, `账号 ${this.records.size + 1}`),
-        partition: partitionForAccount(candidate.id),
+        platform: candidate.platform === "douyin" ? "douyin" : "xhs",
+        partition: partitionForAccount(candidate.id, candidate.platform === "douyin" ? "douyin" : "xhs"),
         createdAt,
         updatedAt: Math.max(createdAt, Number(candidate.updatedAt) || createdAt),
         lastActiveAt: Math.max(0, Number(candidate.lastActiveAt) || 0),
@@ -85,7 +88,8 @@ class AccountRegistry {
     return record;
   }
 
-  async add(name) {
+  async add(name, platform = "xhs") {
+    accountPlatform(platform);
     if (this.records.size >= this.maxAccounts) throw new Error(`最多可同时保留 ${this.maxAccounts} 个账号`);
     const id = String(this.idFactory()).toLowerCase();
     if (!isAccountId(id) || this.records.has(id)) throw new Error("无法生成唯一账号 ID");
@@ -93,7 +97,8 @@ class AccountRegistry {
     const record = {
       id,
       name: normalizeAccountName(name, `账号 ${this.records.size + 1}`),
-      partition: partitionForAccount(id),
+      platform,
+      partition: partitionForAccount(id, platform),
       createdAt: timestamp,
       updatedAt: timestamp,
       lastActiveAt: timestamp,

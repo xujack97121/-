@@ -17,6 +17,8 @@ const { AiService } = require("./ai/ai-service.cjs");
 const { AppUpdates } = require("./platform/app-updates.cjs");
 const { expandedDataDashboardBounds, fitWindowBounds } = require("./platform/data-dashboard-window.cjs");
 const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./platform/renderer-url.cjs");
+const { platformHome, isPlatformPage, douyinVideoId, douyinVideoUrl, douyinResponseScope } = require("./platform/content-platforms.cjs");
+const { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT } = require("./capture/douyin-capture.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
 const HOME_URL = "https://www.xiaohongshu.com/";
@@ -75,6 +77,7 @@ function noteIdFromUrl(rawUrl) {
 }
 
 function commentIdentity(comment, fallbackNoteId = "") {
+  if (comment?.platform === "douyin" && comment.id) return ["douyin", comment.noteId || fallbackNoteId, comment.id].join("\u0000");
   return [comment?.noteId || fallbackNoteId, comment?.authorId || comment?.nickname, comment?.content]
     .map((value) => String(value || "").trim())
     .join("\u0000");
@@ -147,6 +150,11 @@ async function waitForLiveNoteUrl(context, id, attempts = 20) {
 }
 
 async function resolveLiveNoteUrl(context, note) {
+  if (context.platform === "douyin") {
+    const url = douyinVideoUrl(note?.link);
+    if (!url) throw new Error("请输入完整的抖音视频链接（https://www.douyin.com/video/视频ID）");
+    return url;
+  }
   const id = String(note?.id || "");
   if (!isNoteId(id)) throw new Error("笔记 ID 无效");
 
@@ -293,6 +301,7 @@ async function operateOnLoadedNote(context, actions) {
 }
 
 async function operateNote(context, task) {
+  if (context.platform === "douyin") throw new Error("抖音账号目前仅支持公开视频评论采集，不支持自动化操作");
   if (context.operation.active) throw new Error("该账号已有笔记操作正在进行");
   const requestedActions = task?.actions || {};
   if (!requestedActions.like && !requestedActions.collect && !String(requestedActions.comment || "").trim()) {
@@ -332,6 +341,7 @@ function publicAccount(context) {
     id: metadata.id,
     accountId: metadata.id,
     name: metadata.name,
+    platform: context.platform,
     createdAt: metadata.createdAt,
     updatedAt: metadata.updatedAt,
     lastActiveAt: metadata.lastActiveAt,
@@ -362,7 +372,7 @@ function listPublicAccounts() {
       ...metadata,
       accountId: metadata.id,
       active: metadata.id === activeAccountId,
-      url: HOME_URL,
+      url: platformHome(metadata.platform),
       loading: true,
       title: "",
       loginState: "unknown",
@@ -386,6 +396,7 @@ function publishAccountStatus(context) {
 function sendStatus(context, phase, message, extra = {}) {
   sendToRenderer("collector:status", {
     accountId: context.id,
+    platform: context.platform,
     phase,
     message,
     active: context.capture.active || context.operation.active,
@@ -424,6 +435,23 @@ async function scrollOneStep(context, runId) {
   if (!state.active || state.runId !== runId || state.scrollBusy || context.disposed || context.view.webContents.isDestroyed()) return;
   state.scrollBusy = true;
   try {
+    if (context.platform === "douyin") {
+      if (!isDouyinCapturePage(context.view.webContents.getURL(), state.noteId)) {
+        stopAutoScroll(context, "已离开目标视频，评论采集已停止");
+        return;
+      }
+      const page = await context.view.webContents.executeJavaScript(DOUYIN_PAGE_STATE_SCRIPT);
+      if (!isActiveCaptureRun(context.capture, runId)) return;
+      if (page?.blocked) { stopAutoScroll(context, page.blocked); return; }
+      const result = await context.view.webContents.executeJavaScript(DOUYIN_COMMENT_SCROLL_SCRIPT);
+      if (!isActiveCaptureRun(context.capture, runId)) return;
+      state.stalls = result?.waiting || result?.atBottom && !result?.moved && !result?.expanded ? state.stalls + 1 : 0;
+      if (result?.waiting && state.stalls === 1) sendStatus(context, "collecting", "请在左侧打开视频评论区；正在监听该视频正常加载的评论", { collected: captureCount(context), target: state.target });
+      if (state.stalls >= 24) stopAutoScroll(context, result?.waiting
+        ? `未检测到可滚动的评论区，已保留 ${captureCount(context)} 条；请打开评论区后重新采集`
+        : `评论区暂未加载更多内容，已保留 ${captureCount(context)} 条，可重新采集`);
+      return;
+    }
     let expandedReplies = 0;
     if (state.kind === "comments") {
       expandedReplies = await context.view.webContents.executeJavaScript(COMMENT_REPLY_EXPAND_SCRIPT);
@@ -457,24 +485,26 @@ function startAutoScroll(context, runId) {
   state.stalls = 0;
   context.view.webContents.setBackgroundThrottling(false);
   scrollOneStep(context, runId);
-  state.scrollTimer = setInterval(() => scrollOneStep(context, runId), 1400);
+  state.scrollTimer = setInterval(() => scrollOneStep(context, runId), context.platform === "douyin" ? 2500 : 1400);
   const message = state.kind === "comments"
     ? "真实页面已加载，正在读取已显示评论、展开回复并监听分页响应"
     : "真实页面已加载，正在监听页面响应并滚动采集";
-  sendStatus(context, "collecting", message, { collected: captureCount(context), target: state.target });
+  sendStatus(context, "collecting", context.platform === "douyin" ? "请在左侧打开评论区，正在监听目标视频的公开评论" : message, { collected: captureCount(context), target: state.target });
 }
 
 async function startTask(context, task) {
   if (context.operation.active) throw new Error("该账号正在执行笔记操作，请稍后再采集");
   const kind = ["notes", "author", "comments"].includes(task?.kind) ? task.kind : "notes";
   const target = normalizeCaptureTarget(task?.target, kind === "comments" ? 500 : 100);
-  if (!isXhsPage(task?.url)) throw new Error("只允许打开小红书站内页面");
+  if (!isPlatformPage(task?.url, context.platform)) throw new Error("链接平台与当前账号不匹配");
+  const url = context.platform === "douyin" ? douyinVideoUrl(task?.url) : task.url;
+  if (context.platform === "douyin" && (kind !== "comments" || !url)) throw new Error("抖音账号仅支持完整公开视频链接的评论采集");
   stopAutoScroll(context);
   const runId = randomUUID();
-  context.capture = { ...makeCaptureState(), active: true, runId, kind, target, noteId: noteIdFromUrl(task.url), pendingStartRunId: runId };
-  sendStatus(context, "loading", "正在打开真实小红书页面…", { collected: 0, target });
+  context.capture = { ...makeCaptureState(), active: true, runId, kind, target, noteId: context.platform === "douyin" ? douyinVideoId(url) : noteIdFromUrl(url), pendingStartRunId: runId };
+  sendStatus(context, "loading", `正在打开真实${context.platform === "douyin" ? "抖音视频" : "小红书"}页面…`, { collected: 0, target });
   try {
-    await context.view.webContents.loadURL(task.url);
+    await context.view.webContents.loadURL(url);
   } catch (error) {
     stopAutoScroll(context, "页面加载失败，采集已停止");
     throw error;
@@ -486,6 +516,15 @@ function publishCapturePayload(context, payload, runId) {
   const state = context.capture;
   if (!isActiveCaptureRun(state, runId)) return 0;
   const commentsMode = state.kind === "comments";
+  if (context.platform === "douyin") {
+    if (!isDouyinCapturePage(context.view.webContents.getURL(), state.noteId)) return 0;
+    payload = {
+      ...payload,
+      notes: (payload.notes || []).filter((row) => row.platform === "douyin" && row.id === state.noteId),
+      comments: (payload.comments || []).filter((row) => row.platform === "douyin" && row.noteId === state.noteId),
+    };
+    if (payload.notes.length) sendToRenderer("collector:capture", { ...payload, comments: [] });
+  }
   const seenKeys = commentsMode ? state.seenComments : state.seen;
   const selected = selectUniqueRowsWithinTarget({
     rows: commentsMode ? payload.comments : payload.notes,
@@ -527,7 +566,10 @@ async function readResponseBody(context, requestId, meta) {
     const body = result.base64Encoded ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
     if (!body || Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) return;
     const json = JSON.parse(body);
-    const normalized = normalizeCapture(meta.url, json);
+    const normalized = context.platform === "douyin"
+      ? normalizeDouyinCapture(meta.url, json, meta.noteId, context.capture.seen)
+      : normalizeCapture(meta.url, json);
+    if (normalized.blocked) { stopAutoScroll(context, normalized.blocked); return; }
     if (meta.noteId && normalized.comments.length) {
       normalized.comments = normalized.comments.map((comment) => comment.noteId ? comment : { ...comment, noteId: meta.noteId });
     }
@@ -537,10 +579,11 @@ async function readResponseBody(context, requestId, meta) {
     const payload = {
       ...normalized,
       accountId: context.id,
+      platform: context.platform,
       runId: meta.runId,
       kind: meta.kind,
-      url: meta.url,
-      pageUrl: meta.pageUrl,
+      url: context.platform === "douyin" ? `https://www.douyin.com/video/${meta.noteId}` : meta.url,
+      pageUrl: context.platform === "douyin" ? `https://www.douyin.com/video/${meta.noteId}` : meta.pageUrl,
       capturedAt: Date.now(),
       source: "network-response",
     };
@@ -551,6 +594,7 @@ async function readResponseBody(context, requestId, meta) {
 }
 
 async function harvestVisibleComments(context, runId) {
+  if (context.platform === "douyin") return 0;
   const state = context.capture;
   if (!state.active || state.runId !== runId || state.kind !== "comments" || context.disposed || context.view.webContents.isDestroyed()) return 0;
   const pageUrl = context.view.webContents.getURL();
@@ -576,9 +620,17 @@ async function attachNetworkCapture(context) {
   await contents.debugger.sendCommand("Network.enable", { maxTotalBufferSize: 50 * 1024 * 1024, maxResourceBufferSize: MAX_BODY_BYTES });
   if (!context.debuggerMessageListener) {
     context.debuggerMessageListener = (_event, method, params) => {
-    if (method === "Network.responseReceived" && isCollectableApi(params.response?.url)) {
+    if (method === "Network.responseReceived") {
       const state = context.capture;
       if (!state.active || !state.runId) return;
+      if (context.platform === "douyin") {
+        if (!douyinResponseScope(params.response?.url, state.noteId, state.seen)
+          || !isDouyinCapturePage(contents.getURL(), state.noteId)) return;
+        if ([401, 403, 429].includes(params.response?.status)) {
+          stopAutoScroll(context, "抖音限制了当前访问，请在左侧检查登录或验证后稍后重试");
+          return;
+        }
+      } else if (!isCollectableApi(params.response?.url)) return;
       context.pendingResponses.set(params.requestId, {
         url: params.response.url,
         mimeType: params.response.mimeType || "",
@@ -626,8 +678,14 @@ function wireBrowserEvents(context) {
   };
   contents.on("did-start-loading", () => publishNavigation());
   contents.on("did-stop-loading", () => publishNavigation());
-  contents.on("did-navigate", (_event, url) => publishNavigation(url));
-  contents.on("did-navigate-in-page", (_event, url) => publishNavigation(url));
+  const didNavigate = (_event, url, isMainFrame = true) => {
+    if (!isMainFrame) return;
+    if (context.platform === "douyin" && context.capture.active && !isDouyinCapturePage(url, context.capture.noteId))
+      stopAutoScroll(context, "已离开目标视频，评论采集已停止");
+    publishNavigation(url);
+  };
+  contents.on("did-navigate", (_event, url) => didNavigate(_event, url));
+  contents.on("did-navigate-in-page", didNavigate);
   contents.on("did-finish-load", () => {
     publishNavigation();
     const runId = context.capture.pendingStartRunId;
@@ -642,12 +700,18 @@ function wireBrowserEvents(context) {
     if (isMainFrame) sendStatus(context, "error", `页面加载失败：${description} (${code})`, { url });
   });
   contents.setWindowOpenHandler(({ url }) => {
-    if (isXhsPage(url)) contents.loadURL(url);
+    if (isPlatformPage(url, context.platform)) contents.loadURL(url);
     else openSafeExternal(url);
     return { action: "deny" };
   });
   contents.on("will-navigate", (event, url) => {
-    if (!isXhsPage(url)) { event.preventDefault(); openSafeExternal(url); }
+    if (!isPlatformPage(url, context.platform)) { event.preventDefault(); openSafeExternal(url); }
+  });
+  contents.on("will-redirect", (event, url) => {
+    if (!isPlatformPage(url, context.platform)) {
+      event.preventDefault();
+      if (context.capture.active) stopAutoScroll(context, "页面跳转到当前平台外，采集已停止");
+    }
   });
   contents.debugger.on("detach", () => {
     context.pendingResponses.clear();
@@ -667,7 +731,15 @@ function wireBrowserEvents(context) {
 
 async function probeAccountIdentity(context) {
   if (context.disposed || context.view.webContents.isDestroyed()) return null;
-  if (!isXhsPage(context.view.webContents.getURL())) return publicAccount(context);
+  if (!isPlatformPage(context.view.webContents.getURL(), context.platform)) return publicAccount(context);
+  if (context.platform === "douyin") {
+    const identity = await context.view.webContents.executeJavaScript(DOUYIN_PAGE_STATE_SCRIPT).catch(() => null);
+    if (context.disposed) return null;
+    context.identity = { state: identity?.loginState || "unknown", name: "", profileUrl: "", checkedAt: Date.now() };
+    publishAccountStatus(context);
+    publishAccountsChanged();
+    return publicAccount(context);
+  }
   let domIdentity = { state: "unknown", name: "", profileUrl: "" };
   try {
     domIdentity = await context.view.webContents.executeJavaScript(`(() => {
@@ -712,7 +784,7 @@ function hardenAccountSession(accountSession) {
   accountSession.on("will-download", (event) => event.preventDefault());
 }
 
-function createAccountContext(metadata, initialUrl = HOME_URL) {
+function createAccountContext(metadata, initialUrl = platformHome(metadata.platform)) {
   const existing = accountContexts.get(metadata.id);
   if (existing && !existing.disposed) return existing;
 
@@ -730,12 +802,13 @@ function createAccountContext(metadata, initialUrl = HOME_URL) {
   });
   const context = {
     id: metadata.id,
+    platform: metadata.platform || "xhs",
     session: accountSession,
     view,
     capture: makeCaptureState(),
     operation: { active: false, runId: "", startedAt: 0 },
     pendingResponses: new Map(),
-    navigation: { url: isXhsPage(initialUrl) ? initialUrl : HOME_URL, loading: true, title: "" },
+    navigation: { url: isPlatformPage(initialUrl, metadata.platform) ? initialUrl : platformHome(metadata.platform), loading: true, title: "" },
     identity: { state: "unknown", name: "", profileUrl: "", checkedAt: 0 },
     debuggerMessageListener: null,
     debuggerRecoveryTimer: undefined,
@@ -756,7 +829,10 @@ function createAccountContext(metadata, initialUrl = HOME_URL) {
   view.webContents.setAudioMuted(true);
   context.cookieChangedListener = (_event, cookie) => {
     const cookieDomain = String(cookie?.domain || "").replace(/^\./, "").toLowerCase();
-    if (cookie?.name !== "web_session" || !(cookieDomain === "xiaohongshu.com" || cookieDomain.endsWith(".xiaohongshu.com"))) return;
+    const relevant = context.platform === "douyin"
+      ? ["sessionid", "sessionid_ss"].includes(cookie?.name) && (cookieDomain === "douyin.com" || cookieDomain.endsWith(".douyin.com"))
+      : cookie?.name === "web_session" && (cookieDomain === "xiaohongshu.com" || cookieDomain.endsWith(".xiaohongshu.com"));
+    if (!relevant) return;
     if (context.cookieProbeTimer) clearTimeout(context.cookieProbeTimer);
     context.cookieProbeTimer = setTimeout(() => {
       context.cookieProbeTimer = undefined;
@@ -805,7 +881,7 @@ async function recoverAccountContext(context) {
   if (context.recovering || context.disposed || closingWindow) return;
   context.recovering = true;
   const wasActive = activeAccountId === context.id;
-  const lastUrl = isXhsPage(context.navigation.url) ? context.navigation.url : HOME_URL;
+  const lastUrl = isPlatformPage(context.navigation.url, context.platform) ? context.navigation.url : platformHome(context.platform);
   let metadata;
   try { metadata = accountRegistry.get(context.id); } catch { return; }
   await disposeAccountContext(context);
@@ -983,7 +1059,7 @@ ipcMain.handle("accounts:list", (event) => {
 });
 ipcMain.handle("accounts:add", async (event, payload) => {
   assertMainRenderer(event);
-  const metadata = await accountRegistry.add(payload?.name);
+  const metadata = await accountRegistry.add(payload?.name, payload?.platform || "xhs");
   const context = createAccountContext(metadata);
   await activateAccount(context.id);
   return publicAccount(context);
@@ -1067,7 +1143,7 @@ for (const [channel, action] of [
 ipcMain.handle("browser:navigate", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
-  if (!isXhsPage(payload?.url)) throw new Error("不允许的页面地址");
+  if (!isPlatformPage(payload?.url, context.platform)) throw new Error("链接平台与当前账号不匹配");
   if (context.operation.active) throw new Error("该账号正在执行笔记操作");
   stopAutoScroll(context);
   await context.view.webContents.loadURL(payload.url);
@@ -1109,8 +1185,9 @@ ipcMain.handle("browser:home", async (event, payload) => {
   const context = requireContext(payload?.accountId);
   if (context.operation.active) throw new Error("该账号正在执行笔记操作");
   stopAutoScroll(context);
-  await context.view.webContents.loadURL(HOME_URL);
-  return { ok: true, accountId: context.id, url: HOME_URL };
+  const url = platformHome(context.platform);
+  await context.view.webContents.loadURL(url);
+  return { ok: true, accountId: context.id, url };
 });
 ipcMain.handle("browser:set-muted", (event, payload) => {
   assertMainRenderer(event);

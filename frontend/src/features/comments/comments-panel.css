@@ -136,3 +136,14 @@
 .comment-engagement span { display: inline-flex; gap: 4px; align-items: center; }
 .comment-example-reason { margin: 9px 0 0; font-size: 12px; line-height: 1.7; color: #52656c; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .comment-details, .comment-ai-spinner, .comment-ai-activity i { animation: none; } .comment-ai-activity i { width: 100%; opacity: .55; } }
+.comment-capture-status {
+  margin: 0;
+  padding: 8px 0;
+  color: var(--coral-deep);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.comment-capture-status.is-paused {
+  color: #97652d;
+}

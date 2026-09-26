@@ -12,7 +12,10 @@ const nameOf = (value) => typeof value === "string" ? value : value?.name;
 
 const accounts = Object.freeze({
   list: () => ipcRenderer.invoke("accounts:list"),
-  add: (options = {}) => ipcRenderer.invoke("accounts:add", { name: nameOf(options) }),
+  add: (options = {}) => ipcRenderer.invoke("accounts:add", {
+    name: nameOf(options),
+    ...(typeof options === "object" && options?.platform ? { platform: options.platform } : {}),
+  }),
   switch: (account) => ipcRenderer.invoke("accounts:switch", { accountId: accountIdOf(account) }),
   rename: (account, name) => ipcRenderer.invoke("accounts:rename", {
     accountId: accountIdOf(account),
