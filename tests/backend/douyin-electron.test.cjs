@@ -93,6 +93,12 @@ async function main() {
   await api.scrollOneStep(context, context.capture.runId);
   assert.equal(context.capture.active, false);
   assert.ok(messages.some((item) => /安全验证/.test(item.payload.message || "")));
+  await api.startTask(context, { kind: "comments", url: `https://www.douyin.com/video/${VIDEO}`, target: 10 });
+  await context.view.webContents.executeJavaScript("document.body.insertAdjacentHTML('beforeend', '<div role=\"alert\">访问频繁，请稍后再试</div>')");
+  await waitFor(() => !context.capture.scrollBusy);
+  await api.scrollOneStep(context, context.capture.runId);
+  assert.equal(context.capture.active, false);
+  assert.ok(messages.some((item) => item.channel === "collector:status" && item.payload.phase === "error" && /访问频繁/.test(item.payload.message)));
   console.log("Electron Douyin fixture: CDP capture, video metadata, ownership, filtering and verification pause passed");
 }
 

@@ -83,6 +83,11 @@ try {
     };
     globalThis.qa = {
       calls,
+      pauseAutoScroll: () => {
+        emit("status", { accountId: "qa-douyin", platform: "douyin", kind: "comments", active: true,
+          runId: "douyin-run", phase: "warning",
+          message: "已暂停自动翻页；仍在监听本视频，可在左侧手动滚动评论区继续采集" });
+      },
       injectWrongPlatform: () => emit("capture", { accountId: "qa-douyin", runId: "wrong", kind: "comments", platform: "xhs", comments: [{ id: "wrong", noteId: id, content: "不应混入的评论" }] }),
       injectDuplicate: () => emit("capture", { accountId: "qa-douyin", runId: "douyin-run", kind: "comments", platform: "douyin", notes: [], comments: [{ id: "7530000000000000001", noteId: id, platform: "douyin", nickname: "用户甲", content: "讲解清楚，很有帮助", likes: 105, replyCount: 2 }] }),
     };
@@ -112,8 +117,11 @@ try {
   await page.evaluate(() => { qa.injectDuplicate(); qa.injectWrongPlatform(); });
   assert.equal(await page.locator(".comment-card-count strong").textContent(), "3", "Comment ID deduplication keeps separate identical-text comments");
   assert.equal(await page.locator(".comment-card-open h3").textContent(), "公开视频评论样例");
+  await page.evaluate(() => qa.pauseAutoScroll());
+  await page.getByRole("status").filter({ hasText: "已暂停自动翻页" }).waitFor();
   await page.locator(".comment-card-open").click();
   await page.getByRole("complementary", { name: "视频评论统计分析" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "停止采集", exact: true }).isEnabled(), true);
   assert.equal(await page.locator(".comment-metrics dd").first().textContent(), "3");
   assert.equal(await page.getByRole("button", { name: "分析评论", exact: true }).isEnabled(), false);
   await page.getByRole("button", { name: "停止采集", exact: true }).click();

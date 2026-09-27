@@ -1579,6 +1579,7 @@ export function App() {
         if (typeof explicitActive === "boolean") setWorkspaceSection("ui", { live: explicitActive }, accountId);
         updateWorkspace(accountId, (current) => ({ ...current, commentTasks: updateCommentTaskStatus(current.commentTasks, status) }));
         if (status.phase === "error") notifyForAccount(accountId, status.message || "任务执行异常。", "error");
+        else if (status.phase === "warning" && status.message?.startsWith("已暂停自动翻页")) notifyForAccount(accountId, status.message, "info");
         else if (status.phase === "stopped") notifyForAccount(accountId, status.message || "任务已停止。", "success");
       }));
     }

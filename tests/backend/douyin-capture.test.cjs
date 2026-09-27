@@ -8,7 +8,7 @@ const { createRequire } = require("node:module");
 const { EventEmitter } = require("node:events");
 const { AccountRegistry, partitionForAccount } = require("../../backend/accounts/account-registry.cjs");
 const { platformHome, douyinVideoId, douyinVideoUrl, isPlatformPage, douyinResponseScope } = require("../../backend/platform/content-platforms.cjs");
-const { normalizeDouyinCapture, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT } = require("../../backend/capture/douyin-capture.cjs");
+const { normalizeDouyinCapture, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT, DOUYIN_AUTO_SCROLL_INTERVAL_MS, DOUYIN_MAX_AUTO_SCROLL_STEPS } = require("../../backend/capture/douyin-capture.cjs");
 
 const VIDEO = "7520000000000000001";
 const OTHER = "7520000000000000002";
@@ -72,6 +72,34 @@ test("Normalize public comments, replies and metrics without losing precision or
   assert.equal(video.title, "测试视频");
   assert.equal(video.time, "");
   assert.equal(video.link, URL_VIDEO);
+});
+
+test("Douyin rate-limit responses are reported without echoing platform-supplied details", () => {
+  const limited = normalizeDouyinCapture(COMMENTS_URL, {
+    status_code: 100, status_msg: "访问频繁，token=private-fixture", comments: [row("7530000000000000001")],
+  }, VIDEO);
+  assert.equal(limited.comments.length, 0);
+  assert.match(limited.blocked, /访问频繁/);
+  assert.equal(limited.blocked.includes("private-fixture"), false);
+});
+
+test("Douyin page notices stop capture, but a comment mentioning rate limits does not", () => {
+  const inspect = (bodyText, notices = [], commentPanel = false) => vm.runInNewContext(DOUYIN_PAGE_STATE_SCRIPT, {
+    document: {
+      body: { innerText: bodyText },
+      getElementById: () => null,
+      querySelector: () => commentPanel ? {} : null,
+      querySelectorAll: (selector) => selector.includes("toast") ? notices : [],
+    },
+    getComputedStyle: () => ({ visibility: "visible" }),
+  });
+  assert.match(inspect("访问频繁，请稍后再试").blocked, /访问频繁/);
+  const page = inspect("其他公开评论 ".repeat(150) + "访问频繁", [{
+    textContent: "操作过于频繁", getBoundingClientRect: () => ({ width: 120, height: 30 }),
+  }]);
+  assert.match(page.blocked, /访问频繁/);
+  assert.equal(inspect("其他公开评论 ".repeat(150) + "访问频繁").blocked, "");
+  assert.equal(inspect("评论区有人讨论访问频繁", [], true).blocked, "");
 });
 
 test("Old XHS sessions stay unchanged; new Douyin sessions persist independently", async () => {
@@ -231,6 +259,34 @@ test("Visible login or verification pauses instead of scrolling; no global video
   assert.equal(scrolls, 0);
   assert.ok(h.messages.some((item) => item.payload.message === "请在左侧完成安全验证"));
   assert.equal(DOUYIN_COMMENT_SCROLL_SCRIPT.includes("document.scrollingElement"), false);
+});
+
+test("Douyin auto-scroll is paced and bounded, then manual scrolling can continue capture", async () => {
+  assert.ok(DOUYIN_AUTO_SCROLL_INTERVAL_MS >= 10_000);
+  assert.ok(DOUYIN_MAX_AUTO_SCROLL_STEPS <= 12);
+  const h = harness();
+  await h.startTask(h.context, { kind: "comments", url: URL_VIDEO, target: 1000 });
+  h.context.capture.scrollTimer = 1;
+  h.contents.executeJavaScript = async (script) => script === DOUYIN_PAGE_STATE_SCRIPT
+    ? { blocked: "" } : { waiting: false, moved: true, atBottom: false };
+  for (let index = 0; index < DOUYIN_MAX_AUTO_SCROLL_STEPS; index++)
+    await h.scrollOneStep(h.context, h.context.capture.runId);
+  assert.equal(h.context.capture.autoScrollSteps, DOUYIN_MAX_AUTO_SCROLL_STEPS);
+  assert.equal(h.context.capture.scrollTimer, undefined);
+  assert.equal(h.context.capture.active, true);
+  assert.ok(h.messages.some((item) => item.payload.phase === "warning" && /手动滚动/.test(item.payload.message)));
+  const runId = h.context.capture.runId;
+  await h.readResponseBody(h.context, "manual", { runId, noteId: VIDEO, kind: "comments", url: COMMENTS_URL });
+  assert.equal(h.context.capture.seenComments.size, 1);
+});
+
+test("Douyin rate-limit page stops active scrolling with an error status", async () => {
+  const h = harness();
+  await h.startTask(h.context, { kind: "comments", url: URL_VIDEO });
+  h.contents.executeJavaScript = async () => ({ blocked: "抖音页面提示访问频繁，采集已停止；请暂停操作，待平台恢复后再试" });
+  await h.scrollOneStep(h.context, h.context.capture.runId);
+  assert.equal(h.context.capture.active, false);
+  assert.ok(h.messages.some((item) => item.payload.phase === "error" && /访问频繁/.test(item.payload.message)));
 });
 
 test("XHS old search links are canonicalized and network listening is ready before navigation", async () => {

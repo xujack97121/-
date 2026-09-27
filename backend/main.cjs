@@ -18,7 +18,7 @@ const { AppUpdates, requestReleaseRedirect } = require("./platform/app-updates.c
 const { expandedDataDashboardBounds, fitWindowBounds } = require("./platform/data-dashboard-window.cjs");
 const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./platform/renderer-url.cjs");
 const { platformHome, isPlatformPage, platformNavigationUrl, isXhsCapturePage, xhsResponseScope, douyinVideoId, douyinVideoUrl, douyinResponseScope } = require("./platform/content-platforms.cjs");
-const { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT } = require("./capture/douyin-capture.cjs");
+const { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT, DOUYIN_AUTO_SCROLL_INTERVAL_MS, DOUYIN_MAX_AUTO_SCROLL_STEPS } = require("./capture/douyin-capture.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
 const HOME_URL = "https://www.xiaohongshu.com/";
@@ -89,6 +89,7 @@ function makeCaptureState() {
     commentMetrics: new Map(),
     domCommentFingerprints: new Set(),
     stalls: 0,
+    autoScrollSteps: 0,
     noteId: "",
     pendingStartRunId: "",
     targetUrl: "",
@@ -443,12 +444,19 @@ async function scrollOneStep(context, runId) {
       }
       const page = await context.view.webContents.executeJavaScript(DOUYIN_PAGE_STATE_SCRIPT);
       if (!isActiveCaptureRun(context.capture, runId)) return;
-      if (page?.blocked) { stopAutoScroll(context, page.blocked); return; }
+      if (page?.blocked) { stopAutoScroll(context, page.blocked, "error"); return; }
       const result = await context.view.webContents.executeJavaScript(DOUYIN_COMMENT_SCROLL_SCRIPT);
       if (!isActiveCaptureRun(context.capture, runId)) return;
+      if (result?.moved || result?.expanded) state.autoScrollSteps++;
+      if (state.autoScrollSteps >= DOUYIN_MAX_AUTO_SCROLL_STEPS) {
+        clearInterval(state.scrollTimer);
+        state.scrollTimer = undefined;
+        sendStatus(context, "warning", "已暂停自动翻页；仍在监听本视频，可在左侧手动滚动评论区继续采集", { collected: captureCount(context), target: state.target });
+        return;
+      }
       state.stalls = result?.waiting || result?.atBottom && !result?.moved && !result?.expanded ? state.stalls + 1 : 0;
       if (result?.waiting && state.stalls === 1) sendStatus(context, "collecting", "请在左侧打开视频评论区；正在监听该视频正常加载的评论", { collected: captureCount(context), target: state.target });
-      if (state.stalls >= 24) stopAutoScroll(context, result?.waiting
+      if (state.stalls >= 6) stopAutoScroll(context, result?.waiting
         ? `未检测到可滚动的评论区，已保留 ${captureCount(context)} 条；请打开评论区后重新采集`
         : `评论区暂未加载更多内容，已保留 ${captureCount(context)} 条，可重新采集`);
       return;
@@ -486,11 +494,12 @@ async function scrollOneStep(context, runId) {
 function startAutoScroll(context, runId) {
   const state = context.capture;
   if (!state.active || state.runId !== runId || context.disposed) return;
+  if (context.platform === "douyin" && state.autoScrollSteps >= DOUYIN_MAX_AUTO_SCROLL_STEPS) return;
   if (state.scrollTimer) clearInterval(state.scrollTimer);
   state.stalls = 0;
   context.view.webContents.setBackgroundThrottling(false);
   scrollOneStep(context, runId);
-  state.scrollTimer = setInterval(() => scrollOneStep(context, runId), context.platform === "douyin" ? 2500 : 1400);
+  state.scrollTimer = setInterval(() => scrollOneStep(context, runId), context.platform === "douyin" ? DOUYIN_AUTO_SCROLL_INTERVAL_MS : 1400);
   const message = state.kind === "comments"
     ? "真实页面已加载，正在读取已显示评论、展开回复并监听分页响应"
     : "真实页面已加载，正在监听页面响应并滚动采集";
@@ -598,7 +607,7 @@ async function readResponseBody(context, requestId, meta) {
     const normalized = context.platform === "douyin"
       ? normalizeDouyinCapture(meta.url, json, meta.noteId, context.capture.seen)
       : normalizeCapture(meta.url, json);
-    if (normalized.blocked) { stopAutoScroll(context, normalized.blocked); return; }
+    if (normalized.blocked) { stopAutoScroll(context, normalized.blocked, "error"); return; }
     if (meta.noteId && normalized.comments.length) {
       normalized.comments = normalized.comments.map((comment) => comment.noteId ? comment : { ...comment, noteId: meta.noteId });
     }

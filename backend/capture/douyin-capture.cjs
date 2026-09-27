@@ -1,5 +1,8 @@
 const { douyinVideoId, douyinResponseScope } = require("../platform/content-platforms.cjs");
 
+const DOUYIN_AUTO_SCROLL_INTERVAL_MS = 10_000;
+const DOUYIN_MAX_AUTO_SCROLL_STEPS = 12;
+
 function publicId(value) {
   if (typeof value === "number" && !Number.isSafeInteger(value)) return "";
   return /^\d{1,30}$/.test(String(value || "")) ? String(value) : "";
@@ -43,7 +46,10 @@ function normalizeDouyinCapture(url, json, noteId, commentIds = new Set()) {
   const result = { notes: [], comments: [], platform: "douyin", blocked: "" };
   if (!scope || !json || typeof json !== "object") return result;
   if (Number(json.status_code || 0) !== 0) {
-    result.blocked = "抖音未返回可用评论，请在左侧检查登录、验证或视频访问权限后重新采集";
+    const detail = String(json.status_msg || json.message || "").slice(0, 200);
+    result.blocked = /访问频繁|操作频繁|请求频繁|稍后再试|too many requests|rate.?limit/i.test(detail)
+      ? "抖音提示访问频繁，采集已停止；请暂停操作，待平台恢复后再试"
+      : "抖音未返回可用评论，请在左侧检查登录、验证或视频访问权限后重新采集";
     return result;
   }
   if (scope === "video") {
@@ -84,6 +90,12 @@ const DOUYIN_PAGE_STATE_SCRIPT = `(() => {
     && /扫码登录|请输入手机号|登录后.*评论/.test(el.textContent || '')))
     return { blocked: '请在左侧登录抖音后重新采集' };
   const text = document.body?.innerText || '';
+  const rateLimit = /访问(?:过于|太)?频繁|操作(?:过于|太)?频繁|请求(?:过于|太)?频繁/;
+  const notices = [...document.querySelectorAll('[role="alert"],[role="dialog"],[class*="toast"],[class*="notice"],[class*="error"]')];
+  const commentPanel = document.querySelector('[data-e2e="comment-list"],[data-e2e="comment-container"],[data-e2e="comment-panel"]');
+  if (!commentPanel && text.length < 800 && rateLimit.test(text)
+    || notices.some(el => visible(el) && (el.textContent || '').length < 300 && rateLimit.test(el.textContent || '')))
+    return { blocked: '抖音页面提示访问频繁，采集已停止；请暂停操作，待平台恢复后再试' };
   if (/视频已删除|作品已删除|视频不存在|作品不存在|暂时无法观看|作者已设置.*私密|暂无权限/.test(text))
     return { blocked: '该视频当前不可访问，采集已停止' };
   const header = document.getElementById('douyin-header');
@@ -119,4 +131,4 @@ function isDouyinCapturePage(url, noteId) {
   return douyinVideoId(url) === noteId;
 }
 
-module.exports = { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT };
+module.exports = { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT, DOUYIN_AUTO_SCROLL_INTERVAL_MS, DOUYIN_MAX_AUTO_SCROLL_STEPS };
