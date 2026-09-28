@@ -26,7 +26,7 @@ import { randomizeComment } from "../features/comments/comment-randomizer.js";
 import { normalizeNoteTime, noteMatchesTimeRange } from "../features/comments/comment-time-filter.js";
 import { CommentsPanel } from "../features/comments/CommentsPanel.jsx";
 import { buildCommentCollectionIndex, commentCollectionState, commentNoteId, commentNoteLink, removeCommentCards, updateCommentTaskStatus } from "../features/comments/comment-notes.js";
-import { randomizeOperationInterval } from "../features/operations/operation-interval.js";
+import { DEFAULT_OPERATION_INTERVAL_SECONDS, normalizeOperationIntervalSeconds, randomizeOperationInterval } from "../features/operations/operation-interval.js";
 import { actionResultLabel, isActionComplete, taskTimingLabel } from "../features/operations/operation-status.js";
 import { AnalyticsPage } from "../features/analytics/AnalyticsPage.jsx";
 import { SettingsDialog } from "../features/settings/SettingsDialog.jsx";
@@ -454,7 +454,7 @@ function createDefaultWorkspace(realMode, platform = "xhs") {
       likeEnabled: true,
       collectEnabled: true,
       commentEnabled: false,
-      intervalMinutes: 5,
+      intervalSeconds: DEFAULT_OPERATION_INTERVAL_SECONDS,
       intervalStatus: "",
       running: false,
     },
@@ -466,6 +466,8 @@ function createDefaultWorkspace(realMode, platform = "xhs") {
 function normalizeWorkspace(value, realMode) {
   const base = createDefaultWorkspace(realMode, platformOf(value));
   const workspace = value && typeof value === "object" ? value : {};
+  const operation = { ...workspace.operation };
+  delete operation.intervalMinutes;
   return {
     ...base,
     ...workspace,
@@ -476,7 +478,7 @@ function normalizeWorkspace(value, realMode) {
     search: { ...base.search, ...(workspace.search ?? {}), selectedIds: Array.isArray(workspace.search?.selectedIds) ? workspace.search.selectedIds : base.search.selectedIds },
     author: { ...base.author, ...(workspace.author ?? {}), tasks: Array.isArray(workspace.author?.tasks) ? workspace.author.tasks : [], selectedIds: Array.isArray(workspace.author?.selectedIds) ? workspace.author.selectedIds : [] },
     commentsPanel: { ...base.commentsPanel, ...(workspace.commentsPanel ?? {}) },
-    operation: { ...base.operation, ...(workspace.operation ?? {}), intervalStatus: "", running: false },
+    operation: { ...base.operation, ...operation, intervalSeconds: normalizeOperationIntervalSeconds(operation.intervalSeconds), intervalStatus: "", running: false },
     commentTasks: (Array.isArray(workspace.commentTasks) ? workspace.commentTasks : []).map((task) => ({
       ...task,
       status: ["正在打开", "采集中", "监听中"].includes(task.status) ? "已停止" : task.status,
@@ -1249,7 +1251,7 @@ function OperationPanel({ accountId, data, state, setState, tasks, setTasks, set
     likeEnabled = true,
     collectEnabled = true,
     commentEnabled = false,
-    intervalMinutes = 5,
+    intervalSeconds = DEFAULT_OPERATION_INTERVAL_SECONDS,
     intervalStatus = "",
     running = false,
   } = state;
@@ -1353,7 +1355,7 @@ function OperationPanel({ accountId, data, state, setState, tasks, setTasks, set
         notify(`“${task.title}”执行失败：${error.message}`, "error");
       }
       if (index < selectedTasks.length - 1 && !runtime.stop) {
-        const randomizedInterval = randomizeOperationInterval(Math.max(1, Number(intervalMinutes) || 1));
+        const randomizedInterval = randomizeOperationInterval(intervalSeconds);
         setState({ intervalStatus: `本次实际间隔 ${randomizedInterval.totalLabel}（随机浮动 ${randomizedInterval.offsetLabel}）` });
         await pauseBetweenTasks(randomizedInterval.milliseconds, runtime);
         setState({ intervalStatus: "" });
@@ -1378,10 +1380,10 @@ function OperationPanel({ accountId, data, state, setState, tasks, setTasks, set
           <label><input type="checkbox" checked={likeEnabled} onChange={(event) => setState({ likeEnabled: event.target.checked })} /> 点赞</label>
           <label><input type="checkbox" checked={collectEnabled} onChange={(event) => setState({ collectEnabled: event.target.checked })} /> 收藏</label>
           <label><input type="checkbox" checked={commentEnabled} onChange={(event) => setState({ commentEnabled: event.target.checked })} /> 发布评论</label>
-          <label>间隔 <input className="short" type="number" min="1" max="600" step="0.01" value={intervalMinutes} onChange={(event) => setState({ intervalMinutes: Number(event.target.value) })} /> 分钟</label>
+          <label>间隔 <input className="short" aria-label="自动化间隔秒数" type="number" min="1" max="36000" step="0.1" disabled={running} value={intervalSeconds} onChange={(event) => setState({ intervalSeconds: event.target.value })} onBlur={() => setState({ intervalSeconds: normalizeOperationIntervalSeconds(intervalSeconds) })} /> 秒</label>
           {commentEnabled && <textarea aria-label="评论内容" value={commentText} onChange={(event) => setState({ commentText: event.target.value })} placeholder="输入评论正文" />}
           {intervalStatus && <span className="interval-random-hint" role="status">{intervalStatus}</span>}
-          <details className="operation-rules"><summary>执行规则</summary><span>间隔随机浮动 ±10 秒；评论发送前会随机加入 1 个“.”和 1 个 emoji。</span></details>
+          <details className="operation-rules"><summary>执行规则</summary><span>间隔随机浮动 ±1 秒；评论发送前会随机加入 1 个“.”和 1 个 emoji。</span></details>
         </fieldset>
       </div>
       <div className="action-row">
