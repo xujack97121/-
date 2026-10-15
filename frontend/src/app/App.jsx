@@ -28,6 +28,8 @@ import { CommentsPanel } from "../features/comments/CommentsPanel.jsx";
 import { buildCommentCollectionIndex, commentCollectionState, commentNoteId, commentNoteLink, removeCommentCards, updateCommentTaskStatus } from "../features/comments/comment-notes.js";
 import { DEFAULT_OPERATION_INTERVAL_SECONDS, normalizeOperationIntervalSeconds, randomizeOperationInterval } from "../features/operations/operation-interval.js";
 import { actionResultLabel, isActionComplete, taskTimingLabel } from "../features/operations/operation-status.js";
+import { DirectMessagePanel } from "../features/operations/DirectMessagePanel.jsx";
+import { DEFAULT_DM_CONFIG, normalizeDmConfig } from "../features/operations/direct-messages.js";
 import { AnalyticsPage } from "../features/analytics/AnalyticsPage.jsx";
 import { SettingsDialog } from "../features/settings/SettingsDialog.jsx";
 import { useAppUpdates } from "../features/settings/AppUpdates.jsx";
@@ -232,7 +234,7 @@ function dashboardRow(account = {}, workspace = {}, runtime = {}) {
       ? "视频评论采集中" : DASHBOARD_CAPTURE_LABELS[account.capture?.kind] || "采集中";
   } else if (operationActive) {
     state = "operation";
-    stateLabel = "笔记操作中";
+    stateLabel = account.operationKind === "direct-message" ? "评论区私信中" : "笔记操作中";
   } else if (account.loading) {
     state = "loading";
     stateLabel = "页面加载中";
@@ -460,6 +462,7 @@ function createDefaultWorkspace(realMode, platform = "xhs") {
     },
     commentTasks: [],
     operationTasks: [],
+    directMessages: { ...DEFAULT_DM_CONFIG, messages: [""] },
   };
 }
 
@@ -485,6 +488,7 @@ function normalizeWorkspace(value, realMode) {
       runId: "",
     })),
     operationTasks: (Array.isArray(workspace.operationTasks) ? workspace.operationTasks : []).map(restoreOperationTask),
+    directMessages: normalizeDmConfig(workspace.directMessages),
   };
 }
 
@@ -1244,7 +1248,21 @@ function AuthorPanel({ accountId, accountName, data, state, setState, setCurrent
 }
 
 
-function OperationPanel({ accountId, data, state, setState, tasks, setTasks, setCurrentUrl, setLive, notify, openNote }) {
+function AutomationPanel(props) {
+  const [dmActive, setDmActive] = useState(false);
+  const mode = props.state.mode === "direct-message" ? "direct-message" : "interaction";
+  const locked = props.state.running || dmActive || props.accountBusy;
+  return <div className="automation-workspace">
+    <div className="automation-modes" role="group" aria-label="自动化模式">
+      <button type="button" aria-pressed={mode === "interaction"} disabled={locked} onClick={() => props.setState({ mode: "interaction" })}>笔记互动</button>
+      <button type="button" aria-pressed={mode === "direct-message"} disabled={locked} onClick={() => props.setState({ mode: "direct-message" })}>评论区私信</button>
+    </div>
+    <div className="automation-content" hidden={mode !== "interaction"}><OperationPanel {...props} otherBusy={dmActive || props.accountBusy} /></div>
+    <div className="automation-content" hidden={mode !== "direct-message"}><DirectMessagePanel accountId={props.accountId} config={props.dmConfig} setConfig={props.setDmConfig} tasks={props.tasks} setTasks={props.setTasks} desktopMode={props.data.desktopMode} otherBusy={props.state.running || Boolean(props.captureBusy) || Boolean(props.accountBusy && !dmActive)} notify={props.notify} onActive={setDmActive} /></div>
+  </div>;
+}
+
+function OperationPanel({ accountId, data, state, setState, tasks, setTasks, setCurrentUrl, setLive, notify, openNote, otherBusy }) {
   const {
     url = EXPLORE_URL,
     commentText = "支持支持",
@@ -1287,6 +1305,7 @@ function OperationPanel({ accountId, data, state, setState, tasks, setTasks, set
     for (let elapsed = 0; elapsed < total && !runtime.stop; elapsed += 250) await sleep(Math.min(250, total - elapsed));
   };
   const start = async () => {
+    if (otherBusy) { notify("该账号正在执行其他任务，请先停止当前任务。", "error"); return; }
     if (!data.desktopMode) { notify("真实互动操作只在桌面版的嵌入页面中执行。", "error"); return; }
     if (!selectedTasks.length) { notify("请先勾选至少一个笔记任务。", "error"); return; }
     if (!likeEnabled && !collectEnabled && !commentEnabled) { notify("请至少启用一项操作。", "error"); return; }
@@ -1389,7 +1408,7 @@ function OperationPanel({ accountId, data, state, setState, tasks, setTasks, set
       <div className="action-row">
         <strong className="result-count">{tasks.length} 条任务</strong><span className="selection-count">已选 {selectedTasks.length}</span>
         <span className="spacer" />
-        {running ? <button className="button primary" onClick={stop}>停止执行</button> : <button className="button primary" disabled={!selectedTasks.length} onClick={start}><IconPlayerPlay size={16} aria-hidden="true" />开始执行</button>}
+        {running ? <button className="button primary" onClick={stop}>停止执行</button> : <button className="button primary" disabled={!selectedTasks.length || otherBusy} onClick={start}><IconPlayerPlay size={16} aria-hidden="true" />开始执行</button>}
         <ActionMenu>
           <button type="button" disabled={running || !tasks.length} onClick={() => setTasks((previous) => previous.map((task) => ({ ...task, selected: true })))}>全选任务</button>
           <button type="button" disabled={running || !selectedTasks.length} onClick={() => setTasks((previous) => previous.map((task) => ({ ...task, selected: false })))}>取消选择</button>
@@ -1891,7 +1910,7 @@ export function App() {
           ) : (
             <>
               {platform !== "douyin" && <>
-              <div className="panel-route" hidden={activeTab !== "safe"}><OperationPanel accountId={activeAccountId} data={data} state={workspace.operation} setState={(value) => setWorkspaceSection("operation", value)} tasks={operationTasks} setTasks={setOperationTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} /></div>
+              <div className="panel-route" hidden={activeTab !== "safe"}><AutomationPanel accountId={activeAccountId} data={data} state={workspace.operation} setState={(value) => setWorkspaceSection("operation", value)} dmConfig={workspace.directMessages} setDmConfig={(value) => setWorkspaceSection("directMessages", value)} accountBusy={Boolean(activeAccount?.operationActive)} captureBusy={Boolean(activeAccount?.capture?.active && activeAccount?.operationKind !== "direct-message")} tasks={operationTasks} setTasks={setOperationTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} /></div>
               <div className="panel-route" hidden={activeTab !== "search"}><SearchPanel accountId={activeAccountId} accountName={accountName} capture={activeAccount?.capture} data={data} state={workspace.search} setState={(value) => setWorkspaceSection("search", value)} keyword={keyword} setKeyword={setKeyword} setCurrentUrl={setCurrentUrl} live={live} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
               <div className="panel-route" hidden={activeTab !== "author"}><AuthorPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.author} setState={(value) => setWorkspaceSection("author", value)} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
               </>}

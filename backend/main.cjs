@@ -19,6 +19,9 @@ const { expandedDataDashboardBounds, fitWindowBounds } = require("./platform/dat
 const { isAllowedRendererNavigation, resolveRendererDevUrl } = require("./platform/renderer-url.cjs");
 const { platformHome, isPlatformPage, platformNavigationUrl, isXhsCapturePage, xhsResponseScope, douyinVideoId, douyinVideoUrl, douyinResponseScope } = require("./platform/content-platforms.cjs");
 const { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, DOUYIN_COMMENT_SCROLL_SCRIPT, DOUYIN_AUTO_SCROLL_INTERVAL_MS, DOUYIN_MAX_AUTO_SCROLL_STEPS } = require("./capture/douyin-capture.cjs");
+const { DirectMessageService, MessageLedger, extractMainComments } = require("./operations/direct-message-service.cjs");
+const { createDirectMessageHost } = require("./operations/direct-message-host.cjs");
+const dmPage = require("./operations/direct-message-page.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
 const HOME_URL = "https://www.xiaohongshu.com/";
@@ -35,6 +38,7 @@ let mainWindow;
 let accountRegistry;
 let aiService;
 let appUpdates;
+let directMessages;
 let mainRendererUrl = "";
 let activeAccountId = "";
 let browserBounds = { x: 0, y: 0, width: 1, height: 1 };
@@ -303,6 +307,7 @@ async function operateOnLoadedNote(context, actions) {
 async function operateNote(context, task) {
   if (context.platform === "douyin") throw new Error("抖音账号目前仅支持公开视频评论采集，不支持自动化操作");
   if (context.operation.active) throw new Error("该账号已有笔记操作正在进行");
+  if (context.capture.active) throw new Error("该账号正在采集，请先停止采集");
   const requestedActions = task?.actions || {};
   if (!requestedActions.like && !requestedActions.collect && !String(requestedActions.comment || "").trim()) {
     throw new Error("至少启用一项笔记操作");
@@ -361,6 +366,7 @@ function publicAccount(context) {
       target: context.capture.target,
     },
     operationActive: context.operation.active,
+    operationKind: context.operation.kind || "",
     crashed: context.crashed,
   };
 }
@@ -466,6 +472,15 @@ async function scrollOneStep(context, runId) {
       return;
     }
     let expandedReplies = 0;
+    if (state.purpose === "direct-message") {
+      await harvestVisibleComments(context, runId);
+      if (!isActiveCaptureRun(context.capture, runId)) return;
+      const result = await context.view.webContents.executeJavaScript(dmPage.scrollCommentsScript());
+      if (!isActiveCaptureRun(context.capture, runId)) return;
+      state.stalls = result?.atBottom && !result?.moved ? state.stalls + 1 : 0;
+      if (state.stalls >= 6) stopAutoScroll(context, "主评论区暂未加载更多内容，已保留当前结果");
+      return;
+    }
     if (state.kind === "comments") {
       expandedReplies = await context.view.webContents.executeJavaScript(COMMENT_REPLY_EXPAND_SCRIPT);
     }
@@ -501,13 +516,13 @@ function startAutoScroll(context, runId) {
   scrollOneStep(context, runId);
   state.scrollTimer = setInterval(() => scrollOneStep(context, runId), context.platform === "douyin" ? DOUYIN_AUTO_SCROLL_INTERVAL_MS : 1400);
   const message = state.kind === "comments"
-    ? "真实页面已加载，正在读取已显示评论、展开回复并监听分页响应"
+    ? state.purpose === "direct-message" ? "正在采集主评论用户，不展开楼中楼回复" : "真实页面已加载，正在读取已显示评论、展开回复并监听分页响应"
     : "真实页面已加载，正在监听页面响应并滚动采集";
   sendStatus(context, "collecting", context.platform === "douyin" ? "请在左侧打开评论区，正在监听目标视频的公开评论" : message, { collected: captureCount(context), target: state.target });
 }
 
-async function startTask(context, task) {
-  if (context.operation.active) throw new Error("该账号正在执行笔记操作，请稍后再采集");
+async function startTask(context, task, internal = {}) {
+  if (context.operation.active && !(internal.directMessage && context.operation.kind === "direct-message")) throw new Error("该账号正在执行笔记操作，请稍后再采集");
   const kind = ["notes", "author", "comments"].includes(task?.kind) ? task.kind : "notes";
   const target = normalizeCaptureTarget(task?.target, kind === "comments" ? 500 : 100);
   const navigationUrl = platformNavigationUrl(task?.url, context.platform);
@@ -517,6 +532,7 @@ async function startTask(context, task) {
   stopAutoScroll(context);
   const runId = randomUUID();
   const state = { ...makeCaptureState(), active: true, runId, kind, target, targetUrl: url, noteId: context.platform === "douyin" ? douyinVideoId(url) : noteIdFromUrl(url), pendingStartRunId: runId };
+  if (internal.directMessage) Object.assign(state, { purpose: "direct-message", dmRows: new Map(), dmAuthorId: "", dmAuthorConflict: false });
   context.capture = state;
   sendStatus(context, "loading", `正在打开真实${context.platform === "douyin" ? "抖音视频" : "小红书"}页面…`, { collected: 0, target });
   let listening = false;
@@ -604,6 +620,10 @@ async function readResponseBody(context, requestId, meta) {
       stopAutoScroll(context, "小红书拒绝了本次数据请求，采集已停止；请在左侧检查登录、验证或访问限制", "error");
       return;
     }
+    if (context.capture.purpose === "direct-message") {
+      ingestDirectMessageRows(context, extractMainComments(meta.url, json, context.capture.noteId), meta.runId);
+      return;
+    }
     const normalized = context.platform === "douyin"
       ? normalizeDouyinCapture(meta.url, json, meta.noteId, context.capture.seen)
       : normalizeCapture(meta.url, json);
@@ -637,6 +657,16 @@ async function harvestVisibleComments(context, runId) {
   if (!state.active || state.runId !== runId || state.kind !== "comments" || context.disposed || context.view.webContents.isDestroyed()) return 0;
   const pageUrl = context.view.webContents.getURL();
   if (state.targetUrl && !isXhsCapturePage(pageUrl, state)) return 0;
+  if (state.purpose === "direct-message") {
+    const result = await context.view.webContents.executeJavaScript(dmPage.collectPageScript());
+    if (!isActiveCaptureRun(state, runId) || result?.noteId !== state.noteId) return 0;
+    if (result.blocked) { stopAutoScroll(context, result.blocked, "error"); return 0; }
+    if (result.authorId) {
+      if (state.dmAuthorId && state.dmAuthorId !== result.authorId) state.dmAuthorConflict = true;
+      state.dmAuthorId = result.authorId;
+    }
+    return ingestDirectMessageRows(context, result.rows, runId);
+  }
   const rawComments = await context.view.webContents.executeJavaScript(COMMENT_DOM_CAPTURE_SCRIPT);
   const comments = normalizeDomComments(pageUrl, rawComments)
     .map((comment) => ({ ...(comment.noteId ? comment : { ...comment, noteId: state.noteId }), accountId: context.id }))
@@ -649,6 +679,22 @@ async function harvestVisibleComments(context, runId) {
   if (!comments.length) return 0;
   const payload = { notes: [], comments, accountId: context.id, runId, kind: state.kind, url: pageUrl, pageUrl, capturedAt: Date.now(), source: "rendered-page" };
   return publishCapturePayload(context, payload, runId);
+}
+
+function ingestDirectMessageRows(context, rows, runId) {
+  const state = context.capture;
+  if (!isActiveCaptureRun(state, runId) || state.purpose !== "direct-message") return 0;
+  const before = state.dmRows.size;
+  for (const row of rows || []) {
+    if (state.dmRows.size >= state.target) break;
+    const key = `${row.userId}\0${row.content}`;
+    if (!state.dmRows.has(key)) state.dmRows.set(key, row);
+    state.seenComments.add(key);
+  }
+  sendStatus(context, "collecting", `已采集 ${state.dmRows.size} / ${state.target} 条主评论`, { collected: state.dmRows.size, target: state.target });
+  // The author must be verified from the note header before ending at the limit.
+  if (state.dmRows.size >= state.target && state.dmAuthorId) stopAutoScroll(context, "已达到 500 条主评论上限");
+  return state.dmRows.size - before;
 }
 
 async function attachNetworkCapture(context) {
@@ -937,6 +983,7 @@ function createAccountContext(metadata, initialUrl = platformHome(metadata.platf
 
 async function disposeAccountContext(context, { clearData = false } = {}) {
   if (!context || context.disposed) return;
+  directMessages?.stop(context.id);
   context.disposed = true;
   if (context.capture.scrollTimer) clearInterval(context.capture.scrollTimer);
   if (context.capture.startTimer) clearTimeout(context.capture.startTimer);
@@ -1061,6 +1108,16 @@ async function createWindow() {
   });
 
   accountRegistry = new AccountRegistry({ filePath: path.join(app.getPath("userData"), "multi-accounts.json") });
+  if (!directMessages) {
+    directMessages = new DirectMessageService({
+      ledger: new MessageLedger(path.join(app.getPath("userData"), "direct-message-ledger.json")),
+      host: createDirectMessageHost({
+        requireContext, findContext: (id) => accountContexts.get(id), startTask, stopAutoScroll,
+        publishAccount: (context) => { publishAccountStatus(context); publishAccountsChanged(); },
+      }),
+      onProgress: (state) => sendToRenderer("direct-messages:progress", state),
+    });
+  }
   if (process.platform !== "darwin") mainWindow.setMenu(null);
   if (!aiService) {
     aiService = new AiService({
@@ -1254,6 +1311,20 @@ ipcMain.handle("browser:operate-note", async (event, payload) => {
   assertMainRenderer(event);
   return operateNote(requireContext(payload?.accountId), payload?.task);
 });
+for (const [action, handler] of [
+  ["collect", (payload) => directMessages.collect(payload.accountId, payload.notes)],
+  ["review", (payload) => directMessages.review(payload.accountId, payload.config)],
+  ["start", (payload) => directMessages.start(payload.accountId, payload.reviewId)],
+  ["stop", (payload) => directMessages.stop(payload.accountId)],
+  ["state", (payload) => directMessages.snapshot(payload.accountId)],
+]) {
+  ipcMain.handle(`direct-messages:${action}`, (event, payload) => {
+    assertMainRenderer(event);
+    const context = requireContext(payload?.accountId);
+    if (context.platform !== "xhs") throw new Error("评论区私信仅支持小红书桌面账号");
+    return handler({ ...payload, accountId: context.id });
+  });
+}
 ipcMain.handle("browser:start-task", async (event, payload) => {
   assertMainRenderer(event);
   return startTask(requireContext(payload?.accountId), payload?.task);
@@ -1261,6 +1332,7 @@ ipcMain.handle("browser:start-task", async (event, payload) => {
 ipcMain.handle("browser:stop-task", (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
+  if (context.capture.purpose === "direct-message" && context.capture.active) directMessages.stop(context.id);
   stopAutoScroll(context, "用户已停止采集");
   return { ok: true, accountId: context.id };
 });

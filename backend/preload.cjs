@@ -51,11 +51,21 @@ const updates = Object.freeze({
   onState: (callback) => subscribe("updates:state", callback),
 });
 
+const directMessages = Object.freeze({
+  collect: (accountId, notes) => ipcRenderer.invoke("direct-messages:collect", { accountId, notes }),
+  review: (accountId, config) => ipcRenderer.invoke("direct-messages:review", { accountId, config }),
+  start: (accountId, reviewId) => ipcRenderer.invoke("direct-messages:start", { accountId, reviewId }),
+  stop: (accountId) => ipcRenderer.invoke("direct-messages:stop", { accountId }),
+  getState: (accountId) => ipcRenderer.invoke("direct-messages:state", { accountId }),
+  onProgress: (callback) => subscribe("direct-messages:progress", callback),
+});
+
 contextBridge.exposeInMainWorld("collectorDesktop", {
   isDesktop: true,
   accounts,
   ai,
   updates,
+  directMessages,
   listAccounts: accounts.list,
   addAccount: accounts.add,
   createAccount: accounts.add,

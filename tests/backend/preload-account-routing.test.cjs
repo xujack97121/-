@@ -68,6 +68,18 @@ async function main() {
   await expectInvoke(() => exposedApi.reload("account-a"), "browser:reload", { accountId: "account-a" });
   await expectInvoke(() => exposedApi.home("account-a"), "browser:home", { accountId: "account-a" });
   await expectInvoke(() => exposedApi.setMuted("account-b", false), "browser:set-muted", { accountId: "account-b", muted: false });
+  assert.equal(Object.isFrozen(exposedApi.directMessages), true);
+  await expectInvoke(() => exposedApi.directMessages.collect("account-a", [note]), "direct-messages:collect", { accountId: "account-a", notes: [note] });
+  await expectInvoke(() => exposedApi.directMessages.review("account-a", { messages: ["fixture"] }), "direct-messages:review", { accountId: "account-a", config: { messages: ["fixture"] } });
+  await expectInvoke(() => exposedApi.directMessages.start("account-a", "review-1"), "direct-messages:start", { accountId: "account-a", reviewId: "review-1" });
+  await expectInvoke(() => exposedApi.directMessages.stop("account-b"), "direct-messages:stop", { accountId: "account-b" });
+  await expectInvoke(() => exposedApi.directMessages.getState("account-b"), "direct-messages:state", { accountId: "account-b" });
+  let messageProgress;
+  const unsubscribeMessages = exposedApi.directMessages.onProgress((state) => { messageProgress = state; });
+  listeners.get("direct-messages:progress")({}, { accountId: "account-b", phase: "paused" });
+  assert.equal(messageProgress.accountId, "account-b");
+  unsubscribeMessages();
+  assert.equal(removedListeners.at(-1).channel, "direct-messages:progress");
 
   sends.length = 0;
   exposedApi.setBrowserBounds({ x: 1, y: 2, width: 300, height: 400 });

@@ -1,0 +1,48 @@
+.automation-workspace { height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.automation-modes { display: flex; gap: 0; padding: 8px 16px 0; border-bottom: 1px solid var(--line-soft); }
+.automation-modes button { min-height: 34px; padding: 6px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
+.automation-modes button[aria-pressed="true"] { color: var(--coral-deep); border-bottom-color: var(--coral-deep); font-weight: 650; }
+.automation-modes button:disabled { opacity: .5; cursor: not-allowed; }
+.automation-content { min-height: 0; overflow: hidden; }
+.automation-content > .panel-body { height: 100%; }
+.automation-content[hidden] { display: none; }
+.dm-panel { position: relative; height: 100%; min-height: 0; grid-template-rows: auto auto minmax(110px, 1fr); gap: 0; }
+.dm-settings { display: grid; gap: 10px; max-height: 340px; overflow: auto; padding-bottom: 2px; }
+.dm-settings fieldset { min-width: 0; }
+.dm-settings .inline-form input { min-width: 0; }
+.dm-section-toolbar { display: flex; align-items: center; min-width: 0; gap: 8px; margin-top: 4px; }
+.dm-note-list { max-height: 100px; overflow: auto; font-size: 12px; }
+.dm-note-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(75px, 40%) 28px; align-items: center; gap: 7px; padding: 4px 0; }
+.dm-note-row label { display: flex; align-items: center; gap: 7px; min-width: 0; margin: 0; }
+.dm-note-row label input { flex: 0 0 auto; }
+.dm-note-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-note-row > span { font-size: 11px; color: var(--success); }
+.dm-note-row .icon-button { width: 26px; height: 26px; min-height: 26px; }
+.dm-limit-row { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.dm-limit-row label { margin: 0; }
+.dm-message-list { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
+.dm-message-editor { display: grid; grid-template-columns: 46px minmax(0, 1fr) 28px; align-items: start; gap: 7px; }
+.dm-message-editor label { margin: 0; padding-top: 8px; font-size: 12px; }
+.dm-message-editor textarea { width: 100%; min-height: 46px; height: 46px; resize: vertical; padding: 7px; font-size: 12px; line-height: 1.5; }
+.dm-message-editor .icon-button { width: 28px; height: 28px; min-height: 28px; margin-top: 5px; }
+.dm-progress { padding-bottom: 8px; }
+.dm-run-status { display: flex; gap: 6px 12px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--success); }
+.dm-run-status > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.dm-run-status progress { width: 100%; height: 5px; accent-color: var(--coral-deep); }
+.dm-error { color: var(--danger); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.dm-candidates table { min-width: 650px; }
+.dm-user-col { width: 100px; }
+.dm-status-col { width: 130px; }
+.dm-cell-content { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.dm-cell-content small { display: block; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 11px; }
+.dm-dialog-backdrop { position: absolute; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; padding: 14px; background: #493f3866; }
+.dm-confirm-dialog { width: 100%; max-width: 620px; max-height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--cream-50); box-shadow: 0 8px 30px #493f3826; }
+.dm-dialog-heading, .dm-confirm-summary, .dm-dialog-footer { display: flex; align-items: center; gap: 10px; }
+.dm-dialog-heading h2 { margin: 0; flex: 1; font-size: 15px; color: var(--cocoa); }
+.dm-confirm-summary { flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.dm-confirm-list { min-height: 0; overflow: auto; font-size: 12px; }
+.dm-confirm-list > div { padding: 9px 0; border-bottom: 1px solid var(--line-soft); }
+.dm-confirm-list strong { color: var(--cocoa); overflow-wrap: anywhere; }
+.dm-confirm-list p { margin: 5px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.dm-dialog-footer { justify-content: flex-end; }
+@media (max-height: 730px) { .dm-settings { max-height: 230px; } }
