@@ -14,7 +14,7 @@ jobs:
     env:
       RELEASE_TAG: v2.1.8
       RELEASE_SHA: ba916546265823ac4b38a50fa59f886946db4402
-      VERIFY_DIR: ${{ runner.temp }}/verify-release-v2.1.8
+      VERIFY_DIR: /tmp/verify-release-v2.1.8-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
