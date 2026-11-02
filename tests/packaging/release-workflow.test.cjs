@@ -10,6 +10,7 @@ const jobs = workflow.jobs;
 for (const platform of ["windows", "macos"]) {
   assert.ok(jobs[platform].steps.some((step) => step.run === "npm run test:electron-navigation"));
   assert.ok(jobs[platform].steps.some((step) => step.run === "npm run test:electron-update-check"));
+  assert.ok(jobs[platform].steps.some((step) => step.run === "npm run test:electron-creators"));
 }
 assert.match(jobs.windows.steps.map((step) => step.run || "").join("\n"), /verify-update-assets/);
 const assets = jobs.windows.steps.find((step) => step.uses?.startsWith("actions/upload-artifact")).with.path;

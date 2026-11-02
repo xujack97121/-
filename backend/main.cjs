@@ -22,6 +22,7 @@ const { normalizeDouyinCapture, isDouyinCapturePage, DOUYIN_PAGE_STATE_SCRIPT, D
 const { DirectMessageService, MessageLedger, extractMainComments } = require("./operations/direct-message-service.cjs");
 const { createDirectMessageHost } = require("./operations/direct-message-host.cjs");
 const dmPage = require("./operations/direct-message-page.cjs");
+const { createCreatorDiscovery } = require("./creators/creator-discovery.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
 const HOME_URL = "https://www.xiaohongshu.com/";
@@ -39,6 +40,7 @@ let accountRegistry;
 let aiService;
 let appUpdates;
 let directMessages;
+let creators;
 let mainRendererUrl = "";
 let activeAccountId = "";
 let browserBounds = { x: 0, y: 0, width: 1, height: 1 };
@@ -985,6 +987,8 @@ async function disposeAccountContext(context, { clearData = false } = {}) {
   if (!context || context.disposed) return;
   directMessages?.stop(context.id);
   context.disposed = true;
+  try { await creators?.dispose(context.id); }
+  catch { /* Account teardown must continue if an in-flight discovery fails. */ }
   if (context.capture.scrollTimer) clearInterval(context.capture.scrollTimer);
   if (context.capture.startTimer) clearTimeout(context.capture.startTimer);
   if (context.debuggerRecoveryTimer) clearTimeout(context.debuggerRecoveryTimer);
@@ -1116,6 +1120,14 @@ async function createWindow() {
         publishAccount: (context) => { publishAccountStatus(context); publishAccountsChanged(); },
       }),
       onProgress: (state) => sendToRenderer("direct-messages:progress", state),
+    });
+  }
+  if (!creators) {
+    creators = createCreatorDiscovery({
+      requireContext,
+      ensureNetworkCapture: attachNetworkCapture,
+      publishAccount: (context) => { publishAccountStatus(context); publishAccountsChanged(); },
+      onProgress: (state) => sendToRenderer("creators:progress", state),
     });
   }
   if (process.platform !== "darwin") mainWindow.setMenu(null);
@@ -1325,6 +1337,20 @@ for (const [action, handler] of [
     return handler({ ...payload, accountId: context.id });
   });
 }
+for (const [action, handler] of [
+  ["search", (payload) => creators.search(payload.accountId, payload.query)],
+  ["stop", (payload) => creators.stop(payload.accountId)],
+  ["state", (payload) => creators.getState(payload.accountId)],
+  ["open-conversation", (payload) => creators.openConversation(payload.accountId, payload.creator)],
+]) {
+  ipcMain.handle(`creators:${action}`, (event, payload) => {
+    assertMainRenderer(event);
+    if (!creators) throw new Error("找达人服务尚未初始化");
+    const context = requireContext(payload?.accountId);
+    if (context.platform !== "xhs") throw new Error("找达人仅支持小红书桌面账号");
+    return handler({ ...payload, accountId: context.id });
+  });
+}
 ipcMain.handle("browser:start-task", async (event, payload) => {
   assertMainRenderer(event);
   return startTask(requireContext(payload?.accountId), payload?.task);
@@ -1333,6 +1359,7 @@ ipcMain.handle("browser:stop-task", (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
   if (context.capture.purpose === "direct-message" && context.capture.active) directMessages.stop(context.id);
+  if (context.operation.kind === "creator-search") creators?.stop(context.id);
   stopAutoScroll(context, "用户已停止采集");
   return { ok: true, accountId: context.id };
 });

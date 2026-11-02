@@ -80,6 +80,19 @@ async function main() {
   assert.equal(messageProgress.accountId, "account-b");
   unsubscribeMessages();
   assert.equal(removedListeners.at(-1).channel, "direct-messages:progress");
+  assert.equal(Object.isFrozen(exposedApi.creators), true);
+  const creator = { userId: "65a200000000000000000001", nickname: "公开达人" };
+  const query = { keyword: "美妆", minFollowers: 1000, maxFollowers: 50000, limit: 30 };
+  await expectInvoke(() => exposedApi.creators.search("account-a", query), "creators:search", { accountId: "account-a", query });
+  await expectInvoke(() => exposedApi.creators.stop("account-b"), "creators:stop", { accountId: "account-b" });
+  await expectInvoke(() => exposedApi.creators.getState("account-b"), "creators:state", { accountId: "account-b" });
+  await expectInvoke(() => exposedApi.creators.openConversation("account-a", creator), "creators:open-conversation", { accountId: "account-a", creator });
+  let creatorProgress;
+  const unsubscribeCreators = exposedApi.creators.onProgress((state) => { creatorProgress = state; });
+  listeners.get("creators:progress")({}, { accountId: "account-b", phase: "searching" });
+  assert.equal(creatorProgress.accountId, "account-b");
+  unsubscribeCreators();
+  assert.equal(removedListeners.at(-1).channel, "creators:progress");
 
   sends.length = 0;
   exposedApi.setBrowserBounds({ x: 1, y: 2, width: 300, height: 400 });

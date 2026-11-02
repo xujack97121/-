@@ -60,12 +60,21 @@ const directMessages = Object.freeze({
   onProgress: (callback) => subscribe("direct-messages:progress", callback),
 });
 
+const creators = Object.freeze({
+  search: (accountId, query) => ipcRenderer.invoke("creators:search", { accountId, query }),
+  stop: (accountId) => ipcRenderer.invoke("creators:stop", { accountId }),
+  getState: (accountId) => ipcRenderer.invoke("creators:state", { accountId }),
+  openConversation: (accountId, creator) => ipcRenderer.invoke("creators:open-conversation", { accountId, creator }),
+  onProgress: (callback) => subscribe("creators:progress", callback),
+});
+
 contextBridge.exposeInMainWorld("collectorDesktop", {
   isDesktop: true,
   accounts,
   ai,
   updates,
   directMessages,
+  creators,
   listAccounts: accounts.list,
   addAccount: accounts.add,
   createAccount: accounts.add,

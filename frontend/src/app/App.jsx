@@ -19,6 +19,7 @@ import {
   IconUpload,
   IconTrash,
   IconUserCircle,
+  IconUsers,
   IconVolume,
   IconX,
 } from "@tabler/icons-react";
@@ -30,6 +31,8 @@ import { DEFAULT_OPERATION_INTERVAL_SECONDS, normalizeOperationIntervalSeconds, 
 import { actionResultLabel, isActionComplete, taskTimingLabel } from "../features/operations/operation-status.js";
 import { DirectMessagePanel } from "../features/operations/DirectMessagePanel.jsx";
 import { DEFAULT_DM_CONFIG, normalizeDmConfig } from "../features/operations/direct-messages.js";
+import { CreatorDiscoveryPanel } from "../features/creators/CreatorDiscoveryPanel.jsx";
+import { DEFAULT_CREATOR_STATE, normalizeCreatorState, restoreCreatorState } from "../features/creators/creator-discovery.js";
 import { AnalyticsPage } from "../features/analytics/AnalyticsPage.jsx";
 import { SettingsDialog } from "../features/settings/SettingsDialog.jsx";
 import { useAppUpdates } from "../features/settings/AppUpdates.jsx";
@@ -55,6 +58,7 @@ const demoComments = [
 const tabs = [
   { id: "search", label: "搜索笔记", icon: IconSearch },
   { id: "author", label: "作者笔记", icon: IconUserCircle },
+  { id: "creators", label: "找达人", icon: IconUsers },
   { id: "comments", label: "笔记评论", icon: IconMessageCircle },
   { id: "safe", label: "自动化", icon: IconPlayerPlay },
 ];
@@ -234,14 +238,19 @@ function dashboardRow(account = {}, workspace = {}, runtime = {}) {
       ? "视频评论采集中" : DASHBOARD_CAPTURE_LABELS[account.capture?.kind] || "采集中";
   } else if (operationActive) {
     state = "operation";
-    stateLabel = account.operationKind === "direct-message" ? "评论区私信中" : "笔记操作中";
+    stateLabel = {
+      "direct-message": "评论区私信中",
+      "creator-search": "查找达人中",
+      "creator-conversation": "打开达人私信中",
+    }[account.operationKind] || "笔记操作中";
   } else if (account.loading) {
     state = "loading";
     stateLabel = "页面加载中";
   }
 
-  const targetTab = queueRunning || operationActive
-    ? "safe"
+  const targetTab = operationActive && /^creator-/.test(account.operationKind)
+    ? "creators"
+    : queueRunning || operationActive ? "safe"
     : DASHBOARD_CAPTURE_TABS[account.capture?.kind] || workspace.ui?.activeTab || "search";
 
   return {
@@ -463,6 +472,7 @@ function createDefaultWorkspace(realMode, platform = "xhs") {
     commentTasks: [],
     operationTasks: [],
     directMessages: { ...DEFAULT_DM_CONFIG, messages: [""] },
+    creators: normalizeCreatorState(DEFAULT_CREATOR_STATE),
   };
 }
 
@@ -489,6 +499,7 @@ function normalizeWorkspace(value, realMode) {
     })),
     operationTasks: (Array.isArray(workspace.operationTasks) ? workspace.operationTasks : []).map(restoreOperationTask),
     directMessages: normalizeDmConfig(workspace.directMessages),
+    creators: restoreCreatorState(workspace.creators),
   };
 }
 
@@ -1756,6 +1767,15 @@ export function App() {
       panelNotify(`打开笔记失败：${error.message}`, "error");
     }
   };
+  const openCreatorConversation = async (accountId, creator) => {
+    const api = desktop?.creators;
+    if (!data.desktopMode || typeof api?.openConversation !== "function") throw new Error("请使用支持找达人的桌面版本");
+    const result = await api.openConversation(accountId, creator);
+    if (result?.status !== "opened") throw new Error(result?.message || result?.reason || "尚未确认目标达人的私信会话");
+    setWorkspaceSection("ui", { currentUrl: result.url || result.profileUrl || creator.profileUrl, live: false }, accountId);
+    notifyForAccount(accountId, `已打开与“${creator.nickname}”的私信会话。`, "success");
+    return result;
+  };
   const openAnalyticsNote = async (accountId, note) => {
     if (!data.realMode || !note?.link) return;
     try {
@@ -1913,6 +1933,7 @@ export function App() {
               <div className="panel-route" hidden={activeTab !== "safe"}><AutomationPanel accountId={activeAccountId} data={data} state={workspace.operation} setState={(value) => setWorkspaceSection("operation", value)} dmConfig={workspace.directMessages} setDmConfig={(value) => setWorkspaceSection("directMessages", value)} accountBusy={Boolean(activeAccount?.operationActive)} captureBusy={Boolean(activeAccount?.capture?.active && activeAccount?.operationKind !== "direct-message")} tasks={operationTasks} setTasks={setOperationTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} /></div>
               <div className="panel-route" hidden={activeTab !== "search"}><SearchPanel accountId={activeAccountId} accountName={accountName} capture={activeAccount?.capture} data={data} state={workspace.search} setState={(value) => setWorkspaceSection("search", value)} keyword={keyword} setKeyword={setKeyword} setCurrentUrl={setCurrentUrl} live={live} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
               <div className="panel-route" hidden={activeTab !== "author"}><AuthorPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.author} setState={(value) => setWorkspaceSection("author", value)} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
+              <div className="panel-route" hidden={activeTab !== "creators"}><CreatorDiscoveryPanel key={activeAccountId} accountId={activeAccountId} desktopMode={data.desktopMode} state={workspace.creators} setState={(value) => setWorkspaceSection("creators", value)} busy={Boolean(activeAccount?.capture?.active || workspace.operation?.running || activeAccount?.operationActive && activeAccount.operationKind !== "creator-search")} notify={panelNotify} onOpenConversation={openCreatorConversation} /></div>
               </>}
               <div className="panel-route" hidden={activeTab !== "comments"}><CommentsPanel key={activeAccountId} accountId={activeAccountId} accountName={accountName} data={data} state={workspace.commentsPanel} setState={(value) => setWorkspaceSection("commentsPanel", value)} tasks={commentTasks} onStart={collectNoteComments} onStop={stopCommentCollection} onOpen={openCommentNote} activeNoteId={activeCommentNoteId} starting={commentStarting} notify={panelNotify} downloadCsv={downloadCsv} active={activeTab === "comments"} settingsRevision={settingsRevision} runtimeStatus={runtimeStatuses[activeAccountId]} onConfigure={() => setSettingsTab("ai")} /></div>
             </>

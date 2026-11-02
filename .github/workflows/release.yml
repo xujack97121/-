@@ -60,6 +60,7 @@ jobs:
       - run: npm run test:electron-douyin
       - run: npm run test:electron-navigation
       - run: npm run test:electron-direct-messages
+      - run: npm run test:electron-creators
       - run: npm run package:win
       - run: node scripts/verify-update-assets.cjs release
       - uses: actions/upload-artifact@v4
@@ -87,6 +88,7 @@ jobs:
       - run: npm run test:electron-update-check
       - run: npm run test:electron-navigation
       - run: npm run test:electron-direct-messages
+      - run: npm run test:electron-creators
       - run: npm run package:mac
       - uses: actions/upload-artifact@v4
         with:

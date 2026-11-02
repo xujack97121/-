@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import { CREATOR_FOLLOWER_PRESETS, DEFAULT_CREATOR_STATE, creatorCountLabel, mergeCreatorSnapshot, normalizeCreator, normalizeCreatorSnapshot, normalizeCreatorState, restoreCreatorState, validateCreatorSearch } from "../../frontend/src/features/creators/creator-discovery.js";
+
+const userId = "65b200000000000000000001";
+const creator = { userId, profileUrl: `https://www.xiaohongshu.com/user/profile/${userId}`, nickname: "护肤记录", followers: 12000, followerLabel: "1.2万", avatarUrl: "https://sns-avatar-qc.xhscdn.com/avatar/fixture.jpg" };
+const search = (patch = {}) => validateCreatorSearch({ ...DEFAULT_CREATOR_STATE, keyword: "  护肤  ", ...patch });
+
+assert.equal(normalizeCreatorState(null).preset, "all");
+assert.equal(normalizeCreatorState({ snapshot: null }).snapshot.phase, "idle");
+assert.equal(normalizeCreatorState({ preset: "missing" }).preset, "all");
+assert.deepEqual(search().query, { keyword: "护肤", minFollowers: null, maxFollowers: null, limit: 30 });
+for (const preset of CREATOR_FOLLOWER_PRESETS.filter((option) => option.id !== "custom")) {
+  const result = search({ preset: preset.id });
+  assert.equal(result.ok, true);
+  assert.equal(result.query.minFollowers, preset.minFollowers);
+  assert.equal(result.query.maxFollowers, preset.maxFollowers);
+}
+assert.deepEqual(search({ preset: "custom", minFollowers: "0", maxFollowers: "12345" }).query, { keyword: "护肤", minFollowers: 0, maxFollowers: 12345, limit: 30 });
+assert.deepEqual(search({ preset: "custom", minFollowers: "500000" }).query, { keyword: "护肤", minFollowers: 500000, maxFollowers: null, limit: 30 });
+assert.equal(search({ keyword: " " }).field, "keyword");
+assert.equal(search({ keyword: "词".repeat(81) }).field, "keyword");
+assert.equal(search({ keyword: "护肤\n美妆" }).ok, false);
+assert.equal(search({ preset: "custom", minFollowers: "-1" }).field, "minFollowers");
+assert.equal(search({ preset: "custom", minFollowers: "1.5" }).field, "minFollowers");
+assert.equal(search({ preset: "custom", maxFollowers: "1e5" }).field, "maxFollowers");
+assert.equal(search({ preset: "custom", minFollowers: "9007199254740992" }).ok, false);
+assert.equal(search({ preset: "custom", minFollowers: "10", maxFollowers: "9" }).field, "maxFollowers");
+assert.equal(search({ limit: 101 }).field, "limit");
+assert.equal(search({ limit: "" }).field, "limit");
+assert.equal(creatorCountLabel(null), "未公开");
+assert.equal(creatorCountLabel(0), "0");
+assert.equal(creatorCountLabel(12000, "1.2万"), "1.2万");
+assert.equal(normalizeCreator({ ...creator, followers: null }).followers, null);
+assert.equal(normalizeCreator({ ...creator, followers: "" }).followers, null);
+assert.equal(normalizeCreator({ ...creator, avatarUrl: "https://untrusted.example/avatar.jpg" }).avatarUrl, "");
+assert.equal(normalizeCreator({ ...creator, profileUrl: "https://untrusted.example/user/profile/" + userId }), null);
+assert.equal(normalizeCreator({ ...creator, userId: userId + "invalid" }), null);
+assert.equal(normalizeCreator({ ...creator, profileUrl: `https://www.xiaohongshu.com/user/profile/${userId}?xsec_token=public-navigation&xsec_source=pc_search&redirect=blocked` }).profileUrl, creator.profileUrl + "?xsec_token=public-navigation&xsec_source=pc_search");
+assert.equal(normalizeCreatorSnapshot({ creators: [creator, creator, { ...creator, userId: "bad" }] }).creators.length, 1);
+const current = normalizeCreatorSnapshot({ accountId: "a", runId: "run-a", revision: 5, phase: "searching", creators: [creator] });
+assert.equal(mergeCreatorSnapshot(current, { ...current, accountId: "b", revision: 9 }, { accountId: "a" }), current);
+assert.equal(mergeCreatorSnapshot(current, { ...current, revision: 4, creators: [] }, { accountId: "a" }), current);
+assert.equal(mergeCreatorSnapshot(current, { ...current, runId: "old-run", revision: 50 }, { accountId: "a" }), current);
+const recovered = mergeCreatorSnapshot(current, { accountId: "a", phase: "idle" }, { accountId: "a", allowNewRun: true });
+assert.equal(recovered.phase, "stopped");
+assert.equal(recovered.creators.length, 1);
+assert.equal(mergeCreatorSnapshot(recovered, { accountId: "a", phase: "idle" }, { accountId: "a", allowNewRun: true }), recovered);
+assert.equal(mergeCreatorSnapshot(current, { ...current, runId: "new-run", revision: 1, creators: [] }, { accountId: "a", allowNewRun: true }).runId, "new-run");
+assert.equal(mergeCreatorSnapshot(current, { ...current, revision: 6, phase: "completed" }, { accountId: "a" }).active, false);
+const restored = restoreCreatorState({ keyword: "护肤", snapshot: current });
+assert.equal(restored.snapshot.phase, "stopped");
+assert.equal(restored.snapshot.active, false);
+assert.equal(restored.snapshot.creators.length, 1);
+assert.equal(restored.snapshot.runId, "run-a");
+assert.equal(normalizeCreatorState({ snapshot: current }).snapshot.phase, "searching", "Live normalization must not interrupt a running search");
+console.log("PASS: creator follower presets/custom validation, unknown/public counts, safe restored cards and account/run/revision guards");
