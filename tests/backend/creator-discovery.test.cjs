@@ -9,6 +9,8 @@ const USER_B = "65a200000000000000000004";
 const USER_C = "65a200000000000000000005";
 const ORIGIN = "https://www.xiaohongshu.com";
 const API = `${ORIGIN}/api/sns/web/v1/search/usersearch`;
+const NOTES_API = `${ORIGIN}/api/sns/web/v1/search/notes`;
+const NOTE_A = "65b200000000000000000001";
 const row = (userId, fans, extra = {}) => ({ user_info: { user_id: userId, nickname: `公开用户${userId.slice(-1)}` }, fans, ...extra });
 const pause = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 const deferred = () => {
@@ -61,7 +63,7 @@ function fixture(options = {}) {
       type: "Document", frameId: "main-frame", loaderId: loader,
       documentURL: nextUrl, requestId: `document-${loader}`, request: { url: nextUrl },
     });
-    if (options.load) await options.load(nextUrl, api);
+    if (options.load && (!data.profileId(nextUrl) || options.loadProfiles || api.service.getState(context.id).phase === "idle")) await options.load(nextUrl, api);
     loading = false;
     contents.emit("did-navigate", {}, nextUrl);
   };
@@ -70,6 +72,21 @@ function fixture(options = {}) {
     if (options.execute) return options.execute(script, api);
     if (script.includes("function readCreatorSearch(")) return { pageMatches: true, rows: options.rows || [], empty: true };
     if (script.includes("function scrollCreatorSearch(")) return { moved: false, atBottom: true };
+    if (script.includes("function readCreatorProfile(")) {
+      const userId = data.profileId(url);
+      if (options.profile) return options.profile(userId, api);
+      const candidates = [...(options.rows || []), ...[...bodies.values()].flatMap((body) => data.extractCreators(body))];
+      const found = candidates.map(data.normalizeCreator).filter((creator) => creator?.userId === userId)
+        .reduce((previous, incoming) => data.mergeCreator(previous, incoming), null);
+      return {
+        pageMatches: true, profileReady: true, userId, authoredConfirmed: true,
+        creator: { ...found, userId, profileUrl: url, description: "专注美妆护肤内容分享", tags: ["美妆"] },
+        notes: [1, 2, 3].map((index) => ({
+          id: `65b20000000000000000000${index}`, authorId: userId, source: "profile",
+          title: `美妆护肤教程${index}`, description: "彩妆与护肤经验",
+        })),
+      };
+    }
     if (script.includes("function confirmConversation(")) return { status: "opened", userId: USER_A };
     if (script.includes("function openConversation(")) return { status: "opened" };
     throw new Error("Unexpected page script");
@@ -107,6 +124,7 @@ function fixture(options = {}) {
     onProgress: (state) => events.push({ progress: state }),
     pollIntervalMs: 2, searchTimeoutMs: 150, initialWaitMs: 0,
     navigationTimeoutMs: 100, conversationTimeoutMs: 50, scrollIntervalMs: 0, maxScrolls: 4,
+    profileIntervalMs: 0, profileSettleMs: 0, profileTimeoutMs: 20, verificationTimeoutMs: 1000,
     ...options.serviceOptions,
   });
   return api;
@@ -127,8 +145,10 @@ test("搜索参数规范化、整数边界与未知粉丝过滤", () => {
   assert.deepEqual(data.validateSearch({ keyword: "  美妆  ", minFollowers: "0", maxFollowers: "999", limit: 20 }), {
     keyword: "美妆", minFollowers: 0, maxFollowers: 999, limit: 20,
   });
+  assert.equal(data.validateSearch({ keyword: "ＡＩ" }).keyword, "AI");
+  assert.equal(data.isCreatorSearchRequest({ url: `${API}?keyword=${encodeURIComponent("ＡＩ")}` }, "AI"), true);
   for (const input of [
-    {}, { keyword: "" }, { keyword: "a".repeat(81) }, { keyword: "a\nb" },
+    {}, { keyword: "" }, { keyword: "a".repeat(81) }, { keyword: "a\nb" }, { keyword: "a\u200bb" },
     { keyword: "美妆", minFollowers: true }, { keyword: "美妆", minFollowers: -1 },
     { keyword: "美妆", minFollowers: "1.5" }, { keyword: "美妆", minFollowers: 2, maxFollowers: 1 },
     { keyword: "美妆", limit: 101 }, { keyword: "美妆", limit: true },
@@ -138,25 +158,27 @@ test("搜索参数规范化、整数边界与未知粉丝过滤", () => {
   assert.equal(data.matchesFollowers({ followers: 1000 }, { minFollowers: 1000, maxFollowers: 1000 }), true);
 });
 
-test("只接受 HTTPS 平台用户搜索及完全匹配的 GET/POST 关键词", () => {
+test("只接受 HTTPS 平台笔记/用户搜索及完全匹配的 GET/POST 关键词", () => {
   const query = `${API}?keyword=${encodeURIComponent("美妆")}`;
   assert.equal(data.isCreatorSearchRequest({ url: query }, "美妆"), true);
   assert.equal(data.isCreatorSearchRequest({ url: API, method: "POST", postData: '{"keyword":"美妆"}' }, "美妆"), true);
   assert.equal(data.isCreatorSearchRequest({ url: API.replace("www.", "edith."), method: "POST", postData: "keyword=%E7%BE%8E%E5%A6%86" }, "美妆"), true);
+  assert.equal(data.isCreatorSearchRequest({ url: query.replace("/usersearch", "/notes") }, "美妆"), true);
   for (const request of [
     { url: API, method: "POST" }, { url: API, method: "POST", hasPostData: true },
     { url: API, method: "POST", postData: '{"page":1}' },
     { url: query, method: "POST", postData: '{"keyword":"穿搭"}' },
     { url: `${query}&keyword=穿搭` }, { url: query.replace("https:", "http:") },
     { url: query.replace("www.xiaohongshu.com", "www.xiaohongshu.com.evil.test") },
-    { url: query.replace("/usersearch", "/notes") }, { url: query, method: "DELETE" },
+    { url: query.replace("/usersearch", "/recommend") }, { url: query, method: "DELETE" },
     { url: query.replace("https://", "https://name:password@") },
     { url: API, method: "POST", postData: '{"keyword":["美妆"]}' },
   ]) assert.equal(data.isCreatorSearchRequest(request, "美妆"), false, JSON.stringify(request));
   const search = data.searchUrl("美妆 & 护肤");
-  assert.equal(new URL(search).searchParams.get("type"), "51");
+  assert.equal(new URL(search).searchParams.get("type"), "0");
   assert.equal(data.isCreatorSearchPage(search, "美妆 & 护肤"), true);
-  assert.equal(data.isCreatorSearchPage(search.replace("type=51", "type=0"), "美妆 & 护肤"), false);
+  assert.equal(data.isCreatorSearchPage(search.replace("type=0", "type=51"), "美妆 & 护肤"), true);
+  assert.equal(data.isCreatorSearchPage(search.replace("type=0", "type=1"), "美妆 & 护肤"), false);
   assert.equal(data.isCreatorSearchPage(`${search}&keyword=美妆`, "美妆 & 护肤"), false);
 });
 
@@ -215,12 +237,105 @@ test("被动搜索网络和 DOM 合并去重，精确范围筛选，释放账号
   assert.equal(done.creators.length, 1);
   assert.equal(done.creators[0].followers, 12000);
   assert.equal(done.scanned, 3);
+  assert.equal(done.candidates, 3);
+  assert.equal(done.checked, 3);
+  assert.equal(done.stage, "done");
+  assert.equal(done.creators[0].relevance.status, "matched");
   assert.equal(api.context.operation.active, false);
   assert.deepEqual(api.events.filter((event) => "throttle" in event).map((event) => event.throttle), [false, true]);
   assert.equal(api.debuggerApi.listenerCount("message"), 0);
   assert.equal(api.contents.listenerCount("did-navigate"), 0);
   assert.ok(done.revision > started.revision);
   assert.ok(api.events.filter((event) => event.progress).every((event) => event.progress.accountId === "account-a"));
+});
+
+test("综合笔记响应只提取作者候选，搜索命中文本和昵称不能代替主页证据", async () => {
+  const api = fixture({
+    load: async (_url, host) => {
+      const requestId = host.request({ url: NOTES_API, method: "POST", postData: '{"keyword":"美妆"}' });
+      host.respond(requestId, { data: { items: [
+        { id: NOTE_A, model_type: "note", note_card: { display_title: "美妆领域专家", desc: "美妆", user: { user_id: USER_A, nickname: "美妆", desc: "专注美妆", tags: ["美妆"] } } },
+        { id: NOTE_A, model_type: "note", note_card: { user: { user_id: USER_A } } },
+      ] } }, { response: { url: NOTES_API, status: 200, mimeType: "application/json" } });
+      await pause();
+    },
+    profile: (userId) => ({
+      pageMatches: true, profileReady: true, userId, authoredConfirmed: true,
+      creator: { userId, profileUrl: data.publicProfileUrl(userId), description: "", tags: [], followers: 5000 },
+      notes: [{ id: NOTE_A, title: "偶尔买了一支美妆口红", authorId: userId, source: "profile" }],
+    }),
+  });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await api.service.waitForIdle("account-a");
+  const done = api.service.getState("account-a");
+  assert.equal(done.phase, "completed");
+  assert.equal(done.candidates, 1);
+  assert.equal(done.checked, 1);
+  assert.equal(done.creators.length, 0);
+  assert.equal(done.insufficient + done.rejected, 1);
+});
+
+test("主页证据严格归属、去重、八条封顶，不接受收藏/未知作者/已置顶样本", () => {
+  const value = {
+    pageMatches: true, profileReady: true, userId: USER_A, authoredConfirmed: true,
+    creator: { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) },
+    notes: [
+      { id: NOTE_A, title: "重复笔记", authorId: USER_A, source: "profile" },
+      { id: NOTE_A, title: "重复笔记", authorId: USER_A, source: "profile" },
+      { id: USER_B, title: "错作者", authorId: USER_B, source: "profile" },
+      { id: USER_C, title: "收藏", authorId: USER_A, source: "favorites" },
+      { id: "65b200000000000000000099", title: "旧置顶", authorId: USER_A, source: "profile", pinned: true },
+      ...Array.from({ length: 12 }, (_value, index) => ({
+        id: `65b2000000000000000000${String(index + 10).padStart(2, "0")}`, title: `原创${index}`, authorId: USER_A, source: "profile",
+      })),
+    ],
+  };
+  assert.equal(data.normalizeProfileEvidence(value, USER_A).notes.length, 8);
+  assert.equal(data.normalizeProfileEvidence({ ...value, authoredConfirmed: false }, USER_A).notes.length, 0);
+  assert.equal(data.normalizeProfileEvidence({ ...value, userId: USER_B }, USER_A), null);
+  assert.equal(data.normalizeProfileEvidence({ ...value, creator: { userId: USER_B } }, USER_A), null);
+});
+
+test("主页未知粉丝与空简介/标签不回退搜索候选，范围筛选不能静默通过", async () => {
+  const api = fixture({
+    rows: [{ userId: USER_A, followers: 12000, description: "专注美妆", tags: ["美妆"] }],
+    profile: (userId) => ({
+      pageMatches: true, profileReady: true, userId, authoredConfirmed: true,
+      creator: { userId, profileUrl: data.publicProfileUrl(userId), followers: null, description: "", tags: [] },
+      notes: ["美妆底妆教程", "美妆口红测评", "彩妆眼妆教程"].map((title, index) => ({
+        id: `65b20000000000000000000${index + 1}`, title, authorId: userId, source: "profile",
+      })),
+    }),
+  });
+  await api.service.search("account-a", { keyword: "美妆", minFollowers: 1000 });
+  await api.service.waitForIdle("account-a");
+  const done = api.service.getState("account-a");
+  assert.equal(done.creators.length, 0);
+  assert.equal(done.checked, 1);
+  assert.equal(done.rejected, 1);
+});
+
+test("主页核验中可取消，迟到的公开证据不能进入已停止或其他账号结果", async () => {
+  const pendingProfile = deferred();
+  const requestedProfile = deferred();
+  const api = fixture({
+    rows: [{ userId: USER_A }],
+    profile: async () => { requestedProfile.resolve(); return pendingProfile.promise; },
+  });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await requestedProfile.promise;
+  assert.equal(api.service.getState("account-a").stage, "checking");
+  api.service.stop("account-a");
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.context.operation.active, false);
+  pendingProfile.resolve({
+    pageMatches: true, profileReady: true, userId: USER_A, authoredConfirmed: true,
+    creator: { userId: USER_A, description: "美妆", tags: ["美妆"] }, notes: [],
+  });
+  await pause();
+  assert.equal(api.service.getState("account-a").creators.length, 0);
+  assert.equal(api.service.getState("account-b").creators.length, 0);
+  assert.equal(api.service.getState("account-a").checked, 0);
 });
 
 test("POST 请求体关键词校验、错误 frame/loader/页面及旧响应全部排除", async () => {

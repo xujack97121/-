@@ -1,6 +1,7 @@
 const { randomUUID } = require("node:crypto");
 const data = require("./creator-data.cjs");
 const page = require("./creator-page.cjs");
+const { assessCreatorRelevance } = require("./creator-relevance.cjs");
 const { openConversationScript } = require("../operations/direct-message-page.cjs");
 
 const BODY_LIMIT = 2 * 1024 * 1024;
@@ -10,6 +11,8 @@ function createCreatorDiscovery({
   requireContext, publishAccount = () => {}, onProgress = () => {}, ensureNetworkCapture,
   pollIntervalMs = 400, searchTimeoutMs = 45000, navigationTimeoutMs = 20000,
   conversationTimeoutMs = 12000, initialWaitMs = 6000, scrollIntervalMs = 2200, maxScrolls = 24,
+  profileIntervalMs = 2200, profileSettleMs = 1200, profileTimeoutMs = 7000,
+  maxCandidates = 120, verificationTimeoutMs = 8 * 60 * 1000,
 }) {
   const states = new Map();
   const notifyAccount = (context) => { try { publishAccount(context); } catch { /* UI notification cannot retain an operation lock. */ } };
@@ -23,6 +26,7 @@ function createCreatorDiscovery({
     if (!states.has(accountId)) states.set(accountId, {
       accountId, runId: "", revision: 0, phase: "idle", active: false, keyword: "",
       minFollowers: null, maxFollowers: null, limit: 30, creators: new Map(), scanned: 0, message: "",
+      candidates: new Map(), stage: "idle", checked: 0, rejected: 0, insufficient: 0,
     });
     return states.get(accountId);
   };
@@ -33,7 +37,9 @@ function createCreatorDiscovery({
       accountId, runId: current.runId, revision: current.revision, phase: current.phase, active: current.active,
       keyword: current.keyword, minFollowers: current.minFollowers, maxFollowers: current.maxFollowers, limit: current.limit,
       scanned: current.scanned, matched: matched.length,
-      creators: matched.slice(0, current.limit).map((creator) => ({ ...creator })), message: current.message,
+      stage: current.stage, candidates: current.candidates.size, checked: current.checked,
+      rejected: current.rejected, insufficient: current.insufficient,
+      creators: matched.slice(0, current.limit).map((creator) => JSON.parse(JSON.stringify(creator))), message: current.message,
     };
   };
   const publish = (current) => {
@@ -45,6 +51,7 @@ function createCreatorDiscovery({
   const check = (run) => { if (!alive(run)) throw CANCELLED; };
   const step = async (run, promise, timeoutMs = navigationTimeoutMs) => {
     check(run);
+    if (run.verificationDeadline && run.stage === "checking") timeoutMs = Math.max(1, Math.min(timeoutMs, run.verificationDeadline - Date.now()));
     let timer;
     try {
       const result = await Promise.race([
@@ -93,31 +100,34 @@ function createCreatorDiscovery({
       operation, cancelled: false, cancelPromise: new Promise((resolve) => { cancel = resolve; }),
       cleanup: [], requests: new Map(), responses: new Map(), pendingBodies: new Set(),
       mainFrameId: "", documentLoaderId: "", navigating: false, documentReady: false,
+      stage: "collecting", currentProfileId: "",
     };
     run.cancel = () => { run.cancelled = true; cancel(); };
     return run;
   };
   const ingest = (run, rows) => {
-    if (!alive(run)) return 0;
+    if (!alive(run) || run.stage !== "collecting") return 0;
     const current = run.state;
     let changed = false;
     for (const row of rows) {
       const creator = data.normalizeCreator(row);
-      if (!creator || current.creators.size >= 1000 && !current.creators.has(creator.userId)) continue;
-      const previous = current.creators.get(creator.userId);
+      if (!creator || current.candidates.size >= run.candidateLimit && !current.candidates.has(creator.userId)) continue;
+      const previous = current.candidates.get(creator.userId);
       const merged = data.mergeCreator(previous, creator);
       if (!previous || JSON.stringify(previous) !== JSON.stringify(merged)) {
-        current.creators.set(creator.userId, merged);
+        current.candidates.set(creator.userId, merged);
         changed = true;
       }
     }
-    current.scanned = current.creators.size;
+    current.scanned = current.candidates.size;
     if (changed) {
-      current.message = `已检查 ${current.scanned} 位公开用户，找到 ${snapshot(current.accountId).matched} 位符合条件的达人`;
+      current.message = `已从公开搜索收集 ${current.scanned} 位候选作者，正在等待主页综合核验`;
       publish(current);
     }
     return changed ? 1 : 0;
   };
+  const matchesRunPage = (run, url) => run.stage === "collecting"
+    ? data.isCreatorSearchPage(url, run.state.keyword) : data.profileId(url) === run.currentProfileId;
   const failRun = (run, message) => {
     if (!alive(run)) return;
     run.failure = message;
@@ -129,17 +139,25 @@ function createCreatorDiscovery({
       if (params.type === "Document" && params.frameId === run.mainFrameId) {
         run.requests.clear();
         run.responses.clear();
-        run.documentLoaderId = data.isCreatorSearchPage(params.request?.url, run.state.keyword) ? params.loaderId || "" : "";
+        run.documentLoaderId = matchesRunPage(run, params.request?.url) ? params.loaderId || "" : "";
+        run.documentRequestId = params.requestId;
         return;
       }
-      if (!run.documentLoaderId || params.frameId !== run.mainFrameId || params.loaderId !== run.documentLoaderId
+      if (run.stage !== "collecting" || !run.documentLoaderId || params.frameId !== run.mainFrameId || params.loaderId !== run.documentLoaderId
         || !data.isCreatorSearchPage(params.documentURL, run.state.keyword)
         || !data.isCreatorSearchRequest(params.request, run.state.keyword)) return;
       run.requests.set(params.requestId, { url: params.request.url, loaderId: run.documentLoaderId });
     }
     if (method === "Network.responseReceived") {
+      if (run.stage === "checking" && params.type === "Document" && params.frameId === run.mainFrameId
+        && params.loaderId === run.documentLoaderId && params.requestId === run.documentRequestId
+        && data.profileId(params.response?.url) === run.currentProfileId
+        && [401, 403, 429].includes(params.response?.status)) {
+        failRun(run, "平台限制了公开主页访问，已暂停核验，请检查账号登录、验证或访问限制后重试");
+        return;
+      }
       const request = run.requests.get(params.requestId);
-      if (!request || request.loaderId !== run.documentLoaderId || params.loaderId !== request.loaderId
+      if (run.stage !== "collecting" || !request || request.loaderId !== run.documentLoaderId || params.loaderId !== request.loaderId
         || params.frameId !== run.mainFrameId || !data.isCreatorSearchPage(run.contents.getURL(), run.state.keyword)
         || params.response?.url !== request.url) return;
       if ([401, 403, 429].includes(params.response.status)) {
@@ -157,7 +175,7 @@ function createCreatorDiscovery({
       if (!request || params.encodedDataLength > BODY_LIMIT) return;
       const pending = (async () => {
         const result = await step(run, run.contents.debugger.sendCommand("Network.getResponseBody", { requestId: params.requestId }), 5000);
-        if (request.loaderId !== run.documentLoaderId || !data.isCreatorSearchPage(run.contents.getURL(), run.state.keyword)) return;
+        if (run.stage !== "collecting" || request.loaderId !== run.documentLoaderId || !data.isCreatorSearchPage(run.contents.getURL(), run.state.keyword)) return;
         if (typeof result.body !== "string" || result.body.length > BODY_LIMIT * 1.4) return;
         const body = result.base64Encoded ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
         if (Buffer.byteLength(body, "utf8") > BODY_LIMIT) return;
@@ -167,7 +185,7 @@ function createCreatorDiscovery({
           failRun(run, "平台未返回可用的达人搜索结果，请在账号页面检查访问提示后重试");
           return;
         }
-        ingest(run, data.extractCreators(json));
+        ingest(run, data.extractSearchCandidates(json, request.url));
       })().catch((error) => {
         if (error !== CANCELLED && alive(run)) run.networkError = true;
       }).finally(() => run.pendingBodies.delete(pending));
@@ -185,7 +203,7 @@ function createCreatorDiscovery({
     const navigated = (event, legacyUrl, legacyMainFrame = true) => {
       if ((event?.isMainFrame ?? legacyMainFrame) === false || !alive(run) || !run.navigating) return;
       const url = event?.url ?? legacyUrl ?? run.contents.getURL();
-      if (!data.isCreatorSearchPage(url, run.state.keyword)) failRun(run, "已离开本次达人搜索页面，搜索已停止");
+      if (!matchesRunPage(run, url)) failRun(run, "已离开本次达人核验页面，搜索已停止");
     };
     const documentNavigated = (_event, url) => navigated({ isMainFrame: true }, url);
     run.contents.on("did-navigate", documentNavigated);
@@ -202,6 +220,80 @@ function createCreatorDiscovery({
     run.responses.clear();
     unlock(run);
   };
+  async function checkCandidate(run, candidate) {
+    check(run);
+    run.currentProfileId = candidate.userId;
+    run.documentLoaderId = "";
+    run.requests.clear();
+    run.responses.clear();
+    await step(run, run.contents.loadURL(candidate.profileUrl));
+    if (data.profileId(run.contents.getURL()) !== candidate.userId) throw new Error("候选作者主页身份不匹配");
+    const startedAt = Date.now();
+    let evidence = null;
+    let stableCount = -1;
+    let stable = 0;
+    while (Date.now() - startedAt < profileTimeoutMs) {
+      check(run);
+      if (data.profileId(run.contents.getURL()) !== candidate.userId) throw new Error("作者主页身份已变化");
+      const result = await step(run, run.contents.executeJavaScript(page.readCreatorProfileScript({ userId: candidate.userId, maxNotes: 8 })), 5000);
+      if (result?.blocked) { failRun(run, result.blocked); throw CANCELLED; }
+      if (result?.pageMatches === false) throw new Error("公开主页身份无法确认");
+      const current = data.normalizeProfileEvidence(result, candidate.userId);
+      if (current) {
+        evidence = current;
+        stable = current.notes.length === stableCount ? stable + 1 : 0;
+        stableCount = current.notes.length;
+        if (Date.now() - startedAt >= profileSettleMs && (current.notes.length >= 8 || current.notes.length >= 3 && stable >= 2)) break;
+      }
+      await delay(run);
+    }
+    check(run);
+    return evidence;
+  }
+  async function verifyCandidates(run) {
+    const current = run.state;
+    run.stage = "checking";
+    current.stage = "checking";
+    run.requests.clear();
+    run.responses.clear();
+    const deadline = Date.now() + verificationTimeoutMs;
+    run.verificationDeadline = deadline;
+    for (const candidate of current.candidates.values()) {
+      check(run);
+      if (Date.now() >= deadline || current.creators.size >= current.limit) break;
+      if (current.checked) await delay(run, profileIntervalMs);
+      if (Date.now() >= deadline) break;
+      current.message = `正在核验公开主页 ${current.checked + 1}/${current.candidates.size}，已综合匹配 ${current.creators.size} 位达人`;
+      publish(current);
+      try {
+        const evidence = await checkCandidate(run, candidate);
+        check(run);
+        if (!evidence) {
+          current.insufficient += 1;
+        } else {
+          const creator = {
+            ...data.mergeCreator(candidate, evidence.creator),
+            description: evidence.creator.description, tags: [...evidence.creator.tags],
+            followers: evidence.creator.followers, followerLabel: evidence.creator.followerLabel,
+          };
+          const relevance = assessCreatorRelevance({ keyword: current.keyword, creator, notes: evidence.notes });
+          if (relevance.status === "matched" && relevance.matched === true && data.matchesFollowers(creator, current)) {
+            current.creators.set(creator.userId, { ...creator, relevance });
+          } else if (relevance.status === "insufficient") current.insufficient += 1;
+          else current.rejected += 1;
+        }
+      } catch (error) {
+        if (error === CANCELLED) throw error;
+        check(run);
+        current.insufficient += 1;
+      }
+      current.checked += 1;
+      publish(current);
+    }
+    check(run);
+    current.message = `已核验 ${current.checked} 位候选作者，综合匹配 ${current.creators.size} 位达人`
+      + (current.checked < current.candidates.size && current.creators.size < current.limit ? "；已达到本次核验时间上限" : "");
+  }
   async function runSearch(run) {
     const current = run.state;
     try {
@@ -232,7 +324,7 @@ function createCreatorDiscovery({
         if (!visible?.pageMatches) throw new Error("搜索页面已变化，请重新搜索");
         if (visible.blocked) throw new Error(visible.blocked);
         ingest(run, Array.isArray(visible.rows) ? visible.rows : []);
-        if (snapshot(current.accountId).creators.length >= current.limit || current.scanned >= 1000) break;
+        if (current.candidates.size >= run.candidateLimit) break;
         const changed = current.scanned !== previousSize;
         previousSize = current.scanned;
         const waiting = run.requests.size || run.responses.size || run.pendingBodies.size;
@@ -247,11 +339,12 @@ function createCreatorDiscovery({
         await delay(run);
       }
       check(run);
+      await verifyCandidates(run);
       current.phase = "completed";
+      current.stage = "done";
       const count = snapshot(current.accountId).creators.length;
-      current.message = count ? `已找到 ${count} 位达人；结果来自平台公开用户搜索` : current.scanned
-        ? "当前已加载的公开用户中没有符合粉丝范围的达人，可调整条件后重试"
-        : "未读取到公开达人结果，请检查账号页面中的搜索结果或更换关键词";
+      if (!count && !current.scanned) current.message = "未读取到候选作者，请检查账号页面中的公开笔记搜索结果或更换关键词";
+      else if (!count) current.message += "；简介、标签或公开内容样本不足的账号未列入结果，可调整关键词或粉丝范围重试";
     } catch (error) {
       current.phase = error === CANCELLED && !run.failure ? "stopped" : "paused";
       current.message = run.failure || (error === CANCELLED ? "搜索已停止，已保留当前达人结果" : error.message || "达人搜索失败，请重试");
@@ -271,10 +364,12 @@ function createCreatorDiscovery({
     if (current.active) throw new Error("该账号正在查找达人，请先停止当前搜索");
     const operation = lock(context, "creator-search");
     Object.assign(current, settings, {
-      runId: operation.runId, phase: "searching", active: true, creators: new Map(), scanned: 0,
-      message: "正在打开平台用户搜索并读取公开达人资料",
+      runId: operation.runId, phase: "searching", active: true, creators: new Map(), candidates: new Map(), scanned: 0,
+      stage: "collecting", checked: 0, rejected: 0, insufficient: 0,
+      message: "正在通过公开笔记搜索收集候选作者，随后核验简介、标签和公开内容",
     });
     const run = makeRun(current, context, operation);
+    run.candidateLimit = Math.max(1, Math.min(maxCandidates, Math.max(30, current.limit * 3)));
     current.run = run;
     publish(current);
     current.job = runSearch(run);

@@ -82,7 +82,18 @@ function openConversation(tools, options) {
   const blocked = tools.blocked();
   if (blocked) return { status: "paused", reason: blocked, attempted: false };
   if (tools.userId(location.href) !== options.userId) return { status: "paused", reason: "用户主页身份不匹配，未发送", attempted: false };
-  const root = tools.first(document, '#userPage .user-info,.user-page .user-info,[data-profile-user],.user-info,.userInfo') || document;
+  const excluded = (element) => element.closest("nav,aside,.side-bar,.sidebar,.chat-container,.chat-window,.conversation-panel,.chat-panel");
+  const explicit = [...document.querySelectorAll('#userPage .user-info,.user-page .user-info,[data-profile-user]')]
+    .filter(tools.visible).filter((element) => !excluded(element));
+  const fallback = [...document.querySelectorAll(".user-info,.userInfo")].filter(tools.visible)
+    .filter((element) => !excluded(element) && !element.closest("header"));
+  const root = explicit.find((element) => element.getAttribute("data-profile-user")?.toLowerCase() === options.userId)
+    || explicit[0] || fallback[0];
+  if (!root) return { status: "skipped", reason: "尚未找到用户主页信息，未打开私信", attempted: false };
+  const ids = [root.getAttribute("data-profile-user"), root.getAttribute("data-user-id"),
+    ...[...root.querySelectorAll('a[data-profile-link],.user-name a[href*="/user/profile/"],.user-nickname a[href*="/user/profile/"]')].map((link) => tools.userId(link.href))]
+    .filter((id) => /^[a-f\d]{24}$/i.test(id || "")).map((id) => id.toLowerCase());
+  if (ids.some((id) => id !== options.userId)) return { status: "paused", reason: "用户主页信息身份不匹配，未打开私信", attempted: false };
   const button = [...root.querySelectorAll('button,[role="button"],a')].find((element) => tools.visible(element) && /^(私信|发私信|发消息|发送消息)$/.test(tools.text(element)));
   if (!button) return { status: "skipped", reason: "该用户没有可用的私信入口", attempted: false };
   if (button.disabled || button.getAttribute("aria-disabled") === "true") return { status: "skipped", reason: "该用户不允许私信", attempted: false };

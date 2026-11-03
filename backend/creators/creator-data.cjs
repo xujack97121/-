@@ -61,8 +61,8 @@ function parseFollowers(value) {
 }
 
 function validateSearch(input = {}) {
-  const keyword = typeof input.keyword === "string" ? input.keyword.trim().normalize("NFC") : "";
-  if (!keyword || Array.from(keyword).length > 80 || /[\u0000-\u001f\u007f]/.test(keyword)) throw new Error("请输入 1 至 80 字的行业或领域关键词");
+  const keyword = typeof input.keyword === "string" ? input.keyword.trim().normalize("NFKC") : "";
+  if (!keyword || Array.from(keyword).length > 80 || /[\u0000-\u001f\u007f\u200b-\u200d\ufeff]/.test(keyword)) throw new Error("请输入 1 至 80 字的行业或领域关键词");
   const bound = (value, label) => {
     if (value === null || value === undefined || value === "") return null;
     if (typeof value !== "number" && typeof value !== "string" || typeof value === "string" && !/^\d+$/.test(value.trim())) {
@@ -84,7 +84,7 @@ function validateSearch(input = {}) {
 function searchUrl(keyword) {
   const url = new URL("/search_result/", XHS_ORIGIN);
   url.searchParams.set("keyword", keyword);
-  url.searchParams.set("type", "51");
+  url.searchParams.set("type", "0");
   return url.href;
 }
 
@@ -93,8 +93,8 @@ function isCreatorSearchPage(rawUrl, keyword) {
     const url = new URL(rawUrl);
     return url.protocol === "https:" && ["xiaohongshu.com", "www.xiaohongshu.com"].includes(url.hostname)
       && !url.username && !url.password && !url.port && /^\/search_result\/?$/.test(url.pathname)
-      && url.searchParams.getAll("keyword").length === 1 && url.searchParams.get("keyword")?.normalize("NFC") === keyword
-      && url.searchParams.getAll("type").length === 1 && url.searchParams.get("type") === "51";
+      && url.searchParams.getAll("keyword").length === 1 && url.searchParams.get("keyword")?.normalize("NFKC") === keyword
+      && url.searchParams.getAll("type").length <= 1 && [null, "0", "51"].includes(url.searchParams.get("type"));
   } catch { return false; }
 }
 
@@ -105,7 +105,7 @@ function requestKeyword(request) {
       const rows = object instanceof URLSearchParams ? object.getAll(key) : Object.hasOwn(object || {}, key) ? [object[key]] : [];
       for (const value of rows) {
         if (typeof value !== "string" || !value.trim()) return false;
-        values.push(value.trim().normalize("NFC"));
+        values.push(value.trim().normalize("NFKC"));
       }
     }
     return true;
@@ -129,7 +129,7 @@ function isCreatorSearchRequest(request, keyword) {
     const url = new URL(request?.url);
     return url.protocol === "https:" && !url.username && !url.password && !url.port
       && (url.hostname === "xiaohongshu.com" || url.hostname.endsWith(".xiaohongshu.com"))
-      && /^\/api\/sns\/web\/v\d+\/search\/(?:usersearch|users|user)\/?$/.test(url.pathname)
+      && /^\/api\/sns\/web\/v\d+\/search\/(?:notes|usersearch|users|user)\/?$/.test(url.pathname)
       && ["GET", "POST"].includes(String(request.method || "GET").toUpperCase())
       && requestKeyword(request) === keyword;
   } catch { return false; }
@@ -162,6 +162,8 @@ function normalizeCreator(row) {
     redId: text(user.red_id || user.redId || user.redid || row.redId, 100),
     verified: user.verified === true || row.verified === true || Number.isFinite(Number(verification)) && Number(verification) > 0,
     location: text(user.location || user.ip_location || user.ipLocation || row.location, 100),
+    tags: (Array.isArray(user.tags || row.tags) ? user.tags || row.tags : [])
+      .map((tag) => text(typeof tag === "object" ? tag?.name || tag?.tag_name : tag, 60)).filter(Boolean).slice(0, 20),
   };
 }
 
@@ -180,10 +182,55 @@ function extractCreators(json) {
   return [...result.values()];
 }
 
+function extractNoteAuthors(json) {
+  const rows = json?.data?.items || json?.data?.notes;
+  if (!Array.isArray(rows)) return [];
+  const result = new Map();
+  for (const row of rows.slice(0, 1000)) {
+    if (!row || typeof row !== "object" || row.model_type && !/note/i.test(row.model_type)) continue;
+    const note = row.note_card || row.noteCard || row.note || row;
+    const noteId = text(note.note_id || note.noteId || row.id || note.id, 100);
+    const user = note.user || note.author || note.user_info || note.userInfo;
+    if (!validUserId(noteId) || !user || typeof user !== "object") continue;
+    const creator = normalizeCreator({ user_info: user });
+    if (creator) result.set(creator.userId, mergeCreator(result.get(creator.userId), creator));
+  }
+  return [...result.values()];
+}
+
+function extractSearchCandidates(json, sourceUrl) {
+  try {
+    return /\/search\/notes\/?$/.test(new URL(sourceUrl).pathname) ? extractNoteAuthors(json) : extractCreators(json);
+  } catch { return []; }
+}
+
+function normalizeProfileEvidence(value, expectedId) {
+  if (!value || value.pageMatches !== true || value.profileReady !== true || value.userId !== expectedId) return null;
+  const creator = normalizeCreator(value.creator);
+  if (!creator || creator.userId !== expectedId) return null;
+  const notes = new Map();
+  if (value.authoredConfirmed === true) {
+    for (const raw of (Array.isArray(value.notes) ? value.notes : []).slice(0, 30)) {
+      const id = text(raw?.id, 100).toLowerCase();
+      if (!validUserId(id) || raw.authorId !== expectedId || raw.source !== "profile" || raw.pinned === true) continue;
+      const title = text(raw.title, 300);
+      const description = text(raw.description || raw.content, 600);
+      if (!title && !description) continue;
+      notes.set(id, {
+        id, title, description, authorId: expectedId, source: "profile",
+        tags: (Array.isArray(raw.tags) ? raw.tags : []).map((tag) => text(tag, 60)).filter(Boolean).slice(0, 15),
+      });
+      if (notes.size >= 8) break;
+    }
+  }
+  return { creator, notes: [...notes.values()], authoredConfirmed: value.authoredConfirmed === true };
+}
+
 function mergeCreator(previous, incoming) {
   if (!previous) return incoming;
   const merged = { ...previous };
   for (const [key, value] of Object.entries(incoming)) {
+    if (key === "tags" && Array.isArray(value) && !value.length) continue;
     if (key === "profileUrl" && !new URL(value).searchParams.has("xsec_token")
       && new URL(previous.profileUrl).searchParams.has("xsec_token")) continue;
     if (value !== null && value !== "" && !(key === "nickname" && value === "小红书用户") && !(key === "verified" && value === false)) merged[key] = value;
@@ -200,4 +247,5 @@ function matchesFollowers(creator, settings) {
 module.exports = {
   validUserId, publicProfileUrl, profileId, validateCreator, avatarUrl, parseFollowers, validateSearch,
   searchUrl, isCreatorSearchPage, isCreatorSearchRequest, normalizeCreator, extractCreators, mergeCreator, matchesFollowers,
+  extractNoteAuthors, extractSearchCandidates, normalizeProfileEvidence,
 };
