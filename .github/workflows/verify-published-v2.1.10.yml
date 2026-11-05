@@ -1,0 +1,149 @@
+name: Verify published v2.1.10 assets read-only
+
+on:
+  push:
+    branches: [verify-release-v2.1.10]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: v2.1.10
+      RELEASE_SHA: 3db7c30b281f897b65158f32662985f3c0d4c75e
+      VERIFY_DIR: /tmp/verify-release-v2.1.10-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3db7c30b281f897b65158f32662985f3c0d4c75e
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Read official release metadata and verify source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p "$VERIFY_DIR"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$VERIFY_DIR/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$VERIFY_DIR/latest.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$VERIFY_DIR/tag.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" > "$VERIFY_DIR/main.json"
+          node - "$VERIFY_DIR" <<'NODE'
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { execFileSync } = require("node:child_process");
+          const directory = process.argv[2];
+          const read = (name) => JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"));
+          const release = read("release.json");
+          const latest = read("latest.json");
+          const tag = read("tag.json");
+          const main = read("main.json");
+          assert.equal(release.id, 434724642);
+          assert.equal(release.tag_name, process.env.RELEASE_TAG);
+          assert.equal(release.draft, false);
+          assert.equal(release.prerelease, false);
+          assert.equal(release.target_commitish, process.env.RELEASE_SHA);
+          assert.equal(latest.id, release.id);
+          assert.equal(latest.tag_name, process.env.RELEASE_TAG);
+          assert.equal(latest.draft, false);
+          assert.equal(latest.prerelease, false);
+          assert.equal(tag.ref, `refs/tags/${process.env.RELEASE_TAG}`);
+          assert.equal(tag.object.type, "commit");
+          assert.equal(tag.object.sha, process.env.RELEASE_SHA);
+          assert.equal(main.ref, "refs/heads/main");
+          assert.equal(main.object.sha, process.env.RELEASE_SHA);
+          assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), process.env.RELEASE_SHA);
+          assert.equal(require("./package.json").version, "2.1.10");
+          console.log(`PASS: ${release.tag_name} is latest, published and stable; release target, tag, main and checked-out source all equal ${process.env.RELEASE_SHA}`);
+          console.log(`Official release: ${release.html_url}`);
+          NODE
+      - name: Download four official published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$VERIFY_DIR" \
+            --pattern latest.yml \
+            --pattern xiaohongshu-multi-account-2.1.10-x64.exe \
+            --pattern xiaohongshu-multi-account-2.1.10-x64.exe.blockmap \
+            --pattern xiaohongshu-multi-account-2.1.10-arm64.dmg
+      - name: Verify asset sizes, SHA-256 and binary formats
+        shell: bash
+        run: |
+          node - "$VERIFY_DIR" <<'NODE'
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { createHash } = require("node:crypto");
+          const { gunzipSync } = require("node:zlib");
+          const directory = process.argv[2];
+          const release = JSON.parse(fs.readFileSync(path.join(directory, "release.json"), "utf8"));
+          const expected = new Map([
+            ["latest.yml", { id: 711832201, size: 378, sha256: "8609f3ed7d85e888e364b51566b7e0ef1cbed76988eaa3659c02c6aeb265e1d8" }],
+            ["xiaohongshu-multi-account-2.1.10-arm64.dmg", { id: 711832200, size: 117797316, sha256: "00003ef659fbc8c0d5329a97ca96b105dd9b66e899cb2be5ed36a564483f8627" }],
+            ["xiaohongshu-multi-account-2.1.10-x64.exe", { id: 711832203, size: 105361356, sha256: "b07af22a2f81727fd72a77580ec5ad2d34365230f80da22a1d809a9c80ffecbb" }],
+            ["xiaohongshu-multi-account-2.1.10-x64.exe.blockmap", { id: 711832199, size: 111276, sha256: "df7512139f6701f48648047d4998df27e0229f9f21a7503ca15053b414b74bb8" }],
+          ]);
+          assert.deepEqual(release.assets.map((asset) => asset.name).sort(), [...expected.keys()].sort());
+          const signature = (filename, position, length) => {
+            const descriptor = fs.openSync(path.join(directory, filename), "r");
+            try {
+              const value = Buffer.alloc(length);
+              assert.equal(fs.readSync(descriptor, value, 0, length, position), length);
+              return value;
+            } finally { fs.closeSync(descriptor); }
+          };
+          (async () => {
+            for (const asset of release.assets) {
+              const pinned = expected.get(asset.name);
+              assert.equal(asset.id, pinned.id, `${asset.name}: unchanged official asset`);
+              assert.equal(asset.state, "uploaded", `${asset.name}: official uploaded state`);
+              assert.equal(asset.size, pinned.size, `${asset.name}: unchanged official size`);
+              assert.equal(asset.digest, `sha256:${pinned.sha256}`, `${asset.name}: unchanged official digest`);
+              assert.ok(Number.isSafeInteger(asset.size) && asset.size > 0);
+              assert.match(asset.digest, /^sha256:[a-f\d]{64}$/);
+              const filename = path.join(directory, asset.name);
+              const size = fs.statSync(filename).size;
+              assert.equal(size, asset.size, `${asset.name}: actual size`);
+              const hash = createHash("sha256");
+              for await (const chunk of fs.createReadStream(filename)) hash.update(chunk);
+              const digest = hash.digest("hex");
+              assert.equal(`sha256:${digest}`, asset.digest, `${asset.name}: actual SHA-256`);
+              console.log(`PASS asset: ${asset.name}; bytes=${size}; sha256=${digest}`);
+            }
+            const exe = "xiaohongshu-multi-account-2.1.10-x64.exe";
+            const exeSize = fs.statSync(path.join(directory, exe)).size;
+            assert.ok(exeSize > 10 * 1024 * 1024);
+            assert.equal(signature(exe, 0, 2).toString("ascii"), "MZ");
+            console.log("PASS format: Windows installer MZ signature");
+            const dmg = "xiaohongshu-multi-account-2.1.10-arm64.dmg";
+            const dmgSize = fs.statSync(path.join(directory, dmg)).size;
+            assert.ok(dmgSize > 10 * 1024 * 1024);
+            assert.equal(signature(dmg, dmgSize - 512, 4).toString("ascii"), "koly");
+            console.log("PASS format: macOS DMG UDIF koly trailer");
+            const blockmap = JSON.parse(gunzipSync(fs.readFileSync(path.join(directory, `${exe}.blockmap`)), { maxOutputLength: 16 * 1024 * 1024 }).toString("utf8"));
+            assert.ok(["1", "2"].includes(blockmap.version));
+            assert.equal(blockmap.files.length, 1);
+            const file = blockmap.files[0];
+            assert.equal(file.name, "file");
+            assert.equal(file.offset, 0);
+            assert.ok(file.sizes.length > 0);
+            assert.equal(file.sizes.length, file.checksums.length);
+            assert.ok(file.sizes.every((size) => Number.isSafeInteger(size) && size > 0));
+            assert.ok(file.checksums.every((checksum) => typeof checksum === "string" && checksum.length > 0));
+            assert.equal(file.sizes.reduce((sum, size) => sum + size, 0), exeSize);
+            console.log(`PASS blockmap: gzip JSON version ${blockmap.version}; ${file.sizes.length} chunks cover exactly ${exeSize} installer bytes`);
+          })().catch((error) => { console.error(error); process.exitCode = 1; });
+          NODE
+      - name: Install locked verification dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify exact installer SHA-512 against latest.yml
+        run: node scripts/verify-update-assets.cjs "$VERIFY_DIR"
