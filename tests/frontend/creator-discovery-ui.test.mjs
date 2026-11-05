@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE_PATH ? pathToFileURL(process.env.PLAYWRIGHT_MODULE_PATH).href : "playwright");
 const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "msedge", headless: true });
-const output = path.resolve(process.env.UI_TEST_OUTPUT || "../../artifacts/qa-creator-relevance-20261103");
+const output = path.resolve(process.env.UI_TEST_OUTPUT || "../../artifacts/qa-creator-background-20261105");
 await mkdir(output, { recursive: true });
 const errors = [];
 try {
@@ -23,6 +23,7 @@ try {
       "creator-b": { ui: { activeTab: "creators" } },
     }));
     const listeners = new Set();
+    const accountListeners = new Set();
     const calls = [];
     const states = {};
     const reads = {};
@@ -32,8 +33,14 @@ try {
     let keyword = "护肤领域";
     const empty = (accountId) => ({ accountId, runId: "", revision: 0, phase: "idle", active: false, keyword: "", creators: [], scanned: 0, message: "", stage: "", candidates: 0, checked: 0, rejected: 0, insufficient: 0 });
     const broadcast = (state) => { for (const callback of listeners) callback(structuredClone(state)); return structuredClone(state); };
+    const accountStatus = (accountId, patch) => {
+      const account = accounts.find((item) => item.id === accountId);
+      Object.assign(account, patch);
+      for (const callback of accountListeners) callback(structuredClone(account));
+    };
     const emit = (state) => {
       states[state.accountId] = structuredClone(state);
+      accountStatus(state.accountId, { operationActive: state.phase === "searching", operationKind: state.phase === "searching" ? "creator-search" : "", capture: { active: false } });
       return broadcast(state);
     };
     const creator = (index, patch = {}) => {
@@ -62,8 +69,11 @@ try {
       accounts: {
         list: async () => ({ accounts, activeAccountId: JSON.parse(localStorage.getItem("xhs-collector-account-cache-v2")).activeAccountId }),
         switch: async () => ({ ok: true }),
+        onStatus: (callback) => { accountListeners.add(callback); return () => accountListeners.delete(callback); },
       },
       setBrowserBounds() {}, setDataDashboardOpen() {},
+      home: async (accountId) => { calls.push({ action: "home", accountId }); accountStatus(accountId, { capture: { active: false } }); return { url: "https://www.xiaohongshu.com/" }; },
+      reload: async (accountId) => { calls.push({ action: "reload", accountId }); accountStatus(accountId, { capture: { active: false } }); return { ok: true }; },
       creators: {
         getState: (accountId) => new Promise((resolve) => { reads[accountId] = resolve; }),
         onProgress: (callback) => { listeners.add(callback); return () => listeners.delete(callback); },
@@ -83,9 +93,19 @@ try {
           if (qa.delayConversation) await new Promise((resolve) => { qa.finishConversation = resolve; });
           return { status: "opened", url: "https://www.xiaohongshu.com/message", recipientId: row.userId };
         },
+        openProfile: async (accountId, row) => {
+          calls.push({ action: "profile", accountId, creator: row });
+          if (qa.delayProfile) await new Promise((resolve) => { qa.finishProfile = resolve; });
+          return { status: "opened", url: row.profileUrl };
+        },
+        openTaskPage: async (accountId) => {
+          calls.push({ action: "task-page", accountId });
+          if (qa.rejectTaskPage) throw new Error("任务页面暂不可用，请重新查找");
+          return { status: "opened", url: "https://www.xiaohongshu.com/search_result?keyword=fixture-task" };
+        },
       },
     };
-    globalThis.qa = { calls, states, reads, emit, broadcast, creator, empty, runId, rejectSearch: false, rejectConversation: false };
+    globalThis.qa = { calls, states, reads, emit, broadcast, accountStatus, creator, empty, runId, rejectSearch: false, rejectConversation: false };
   });
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
@@ -118,14 +138,51 @@ try {
   assert.equal(await panel.getByText("未经核验的候选作者", { exact: true }).count(), 0);
   assert.equal(await panel.getByText("证据不足 1 位", { exact: true }).count(), 1);
   await page.screenshot({ path: path.join(output, "creators-checking-1440.png"), animations: "disabled" });
-  assert.equal(await page.getByLabel("私信达人 认真护肤的林同学", { exact: true }).isDisabled(), true);
+  assert.equal(await page.getByLabel("私信达人 认真护肤的林同学", { exact: true }).isEnabled(), true);
+  assert.equal(await page.getByLabel("打开达人主页 认真护肤的林同学", { exact: true }).isEnabled(), true);
+  await page.getByRole("button", { name: "返回小红书首页", exact: true }).click();
+  await page.getByRole("button", { name: "刷新嵌入页面", exact: true }).click();
+  assert.equal(await page.evaluate(() => qa.states["creator-a"].phase), "searching");
+  assert.equal(await page.locator(".browser-label .status-dot").getAttribute("class").then((value) => value.includes("running")), false, "Background search is not foreground collection");
+  await page.evaluate(() => { qa.delayProfile = true; });
+  await page.getByLabel("打开达人主页 认真护肤的林同学", { exact: true }).click();
+  await panel.getByText("打开中", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "停止查找", exact: true }).isEnabled(), true, "Opening a profile must not lock stop");
+  assert.equal(await page.getByRole("button", { name: "刷新嵌入页面", exact: true }).isDisabled(), true, "Foreground navigation is serialized");
+  await page.evaluate(() => qa.emit({ ...qa.states["creator-a"], revision: 3, checked: 5, message: "正在核验公开内容，已找到新的匹配达人", creators: [...qa.states["creator-a"].creators, qa.creator(6, { nickname: "搜索中新增的达人" })] }));
+  await panel.getByText("搜索中新增的达人", { exact: true }).waitFor();
+  await panel.getByText("正在核验公开内容，已找到新的匹配达人", { exact: true }).waitFor();
+  await page.evaluate(() => { qa.delayProfile = false; qa.finishProfile(); });
+  await page.getByText("已打开“认真护肤的林同学”的主页。", { exact: false }).waitFor();
+  assert.ok((await page.locator(".address-field").textContent()).includes("65b200000000000000000001?xsec_token=public-fixture"));
+  assert.equal(await page.evaluate(() => qa.calls.filter((call) => call.action === "stop").length), 0, "Foreground browsing never stops the background search");
+  await page.evaluate(() => { qa.rejectConversation = true; });
+  await page.getByLabel("私信达人 认真护肤的林同学", { exact: true }).click();
+  await panel.getByRole("alert", { name: "达人页面打开失败" }).getByText("该达人暂未开放私信", { exact: true }).waitFor();
+  await panel.getByText("正在核验公开内容，已找到新的匹配达人", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "停止查找", exact: true }).isEnabled(), true);
+  assert.equal(await page.evaluate(() => qa.states["creator-a"].phase), "searching");
+  await page.evaluate(() => { qa.rejectConversation = false; });
+  await page.screenshot({ path: path.join(output, "creators-background-interactive-1440.png"), animations: "disabled" });
   await page.evaluate(() => {
     qa.broadcast({ ...qa.states["creator-a"], revision: 1, creators: [] });
     qa.broadcast({ ...qa.empty("creator-b"), runId: "foreign", revision: 99, phase: "completed", creators: [qa.creator(3)] });
   });
-  assert.equal(await panel.locator(".creator-card").count(), 2);
-  await page.evaluate(() => qa.emit({ ...qa.states["creator-a"], revision: 3, stage: "done", phase: "completed", active: false, scanned: 9, message: "查找完成", creators: [qa.creator(1), qa.creator(2, { followers: 45000, followerLabel: "4.5万", likes: 24680, noteCount: 123 })] }));
+  assert.equal(await panel.locator(".creator-card").count(), 3);
+  await page.evaluate(() => qa.emit({ ...qa.states["creator-a"], revision: 4, stage: "done", phase: "completed", active: false, scanned: 9, message: "查找完成" }));
   await page.getByRole("button", { name: "查找达人", exact: true }).waitFor();
+  for (const name of ["返回小红书首页", "刷新嵌入页面"]) {
+    await page.evaluate(() => qa.accountStatus("creator-a", { capture: { active: true } }));
+    await page.waitForFunction(() => document.querySelector('[aria-label="私信达人 认真护肤的林同学"]').disabled);
+    assert.equal(await page.getByRole("button", { name, exact: true }).isEnabled(), true, "Browser navigation retains capture-stop behavior");
+    await page.getByRole("button", { name, exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('[aria-label="私信达人 认真护肤的林同学"]').disabled);
+  }
+  await page.evaluate(() => qa.accountStatus("creator-a", { operationActive: true, operationKind: "like-note" }));
+  await page.waitForFunction(() => document.querySelector('[aria-label="刷新嵌入页面"]').disabled);
+  assert.equal(await page.getByRole("button", { name: "返回小红书首页", exact: true }).isDisabled(), true, "Active foreground automation remains mutually exclusive");
+  await page.evaluate(() => qa.accountStatus("creator-a", { operationActive: false, operationKind: "" }));
+  await page.waitForFunction(() => !document.querySelector('[aria-label="刷新嵌入页面"]').disabled);
   assert.equal(await panel.locator(".creator-followers").first().textContent(), "1.2万粉丝");
   await panel.locator(".creator-card").first().getByText("更多匹配依据（1）", { exact: true }).click();
   await panel.locator(".creator-card").first().locator(".creator-more-evidence").getByText("护肤领域研究", { exact: true }).waitFor();
@@ -167,12 +224,24 @@ try {
   assert.equal(await panel.locator(".creator-card").count(), 0, "A retired run cannot replace a new search");
   await page.evaluate(() => qa.emit({ ...qa.states["creator-a"], runId: qa.runId(2), revision: 2, phase: "searching", active: true, creators: [qa.creator(3, { nickname: "瑜伽记录", followers: null, followerLabel: "" })] }));
   await panel.getByText("未公开", { exact: true }).waitFor();
+  await page.evaluate(() => { qa.rejectConversation = false; qa.delayConversation = true; });
+  await page.getByLabel("私信达人 瑜伽记录", { exact: true }).click();
+  await panel.getByText("打开中", { exact: true }).waitFor();
   await page.getByRole("button", { name: "停止查找", exact: true }).click();
   await panel.getByText("已停止查找，保留当前结果", { exact: true }).waitFor();
   assert.equal((await page.evaluate(() => qa.calls.find((call) => call.action === "stop"))).accountId, "creator-a");
   await page.getByRole("tab", { name: /达人测试乙/ }).click();
   await panel.getByText("暂无达人", { exact: true }).waitFor();
   assert.equal(await page.getByLabel("行业关键词").inputValue(), "");
+  await page.getByRole("tab", { name: /达人测试甲/ }).click();
+  await panel.getByText("瑜伽记录", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("私信达人 瑜伽记录", { exact: true }).isDisabled(), true, "Foreground lock survives an account switch");
+  await page.getByRole("tab", { name: /达人测试乙/ }).click();
+  await panel.getByText("暂无达人", { exact: true }).waitFor();
+  const accountBUrl = await page.locator(".address-field").textContent();
+  await page.evaluate(() => { qa.delayConversation = false; qa.finishConversation(); });
+  await page.getByText("已打开与“瑜伽记录”的私信会话。", { exact: false }).waitFor();
+  assert.equal(await page.locator(".address-field").textContent(), accountBUrl, "Late account A opening must not change account B's URL");
   await page.getByLabel("行业关键词").fill("咖啡");
   await page.getByLabel("达人粉丝量范围").selectOption("under-1k");
   await page.getByRole("button", { name: "查找达人", exact: true }).click();
@@ -199,8 +268,16 @@ try {
   await page.evaluate(() => { qa.rejectSearch = false; });
   await page.getByRole("button", { name: "查找达人", exact: true }).click();
   await page.getByRole("button", { name: "停止查找", exact: true }).waitFor();
-  await page.evaluate(() => qa.emit({ ...qa.states["creator-a"], revision: 2, phase: "paused", active: false, message: "请在左侧完成平台验证" }));
-  await panel.getByText("请在左侧完成平台验证", { exact: true }).waitFor();
+  await page.evaluate(() => qa.emit({ ...qa.states["creator-a"], revision: 2, phase: "paused", active: false, message: "平台要求验证，请检查任务页面" }));
+  await panel.getByText("平台要求验证，请检查任务页面", { exact: true }).waitFor();
+  const foregroundBeforeTaskPage = await page.locator(".address-field").textContent();
+  await page.getByRole("button", { name: "检查任务页面", exact: true }).click();
+  assert.equal((await page.evaluate(() => qa.calls.find((call) => call.action === "task-page"))).accountId, "creator-a");
+  assert.equal(await page.locator(".address-field").textContent(), foregroundBeforeTaskPage, "Opening validation task page must not replace foreground URL");
+  await page.evaluate(() => { qa.rejectTaskPage = true; });
+  await page.getByRole("button", { name: "检查任务页面", exact: true }).click();
+  await panel.getByRole("alert", { name: "达人页面打开失败" }).getByText("任务页面暂不可用，请重新查找", { exact: true }).waitFor();
+  await panel.getByText("平台要求验证，请检查任务页面", { exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "查找达人", exact: true }).isEnabled(), true);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.screenshot({ path: path.join(output, "creators-error-980.png"), animations: "disabled" });
@@ -241,5 +318,5 @@ try {
   assert.equal(await page.getByRole("button", { name: "查找达人", exact: true }).isEnabled(), true);
   await page.screenshot({ path: path.join(output, "creators-legacy-recheck-980.png"), animations: "disabled" });
   assert.deepEqual(errors, []);
-  console.log("PASS: verified evidence cards desktop/narrow screenshots, two-stage real progress, unverified exclusion, filters, safe chat, account/run guards, interrupted restart, legacy cache clearing and retry");
+  console.log("PASS: background incremental cards, profile/chat while searching, independent stop/navigation/error locks, capture-stop browser navigation, foreground automation exclusion, owner-account late results, task validation page, screenshots and restart recovery");
 } finally { await browser.close(); }

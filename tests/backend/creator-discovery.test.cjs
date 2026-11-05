@@ -26,6 +26,7 @@ function fixture(options = {}) {
   const scripts = [];
   const requests = [];
   const contents = new EventEmitter();
+  const foregroundContents = new EventEmitter();
   const debuggerApi = new EventEmitter();
   const bodies = new Map();
   let bodyCount = 0;
@@ -34,11 +35,15 @@ function fixture(options = {}) {
   let destroyed = false;
   let attached = true;
   let loader = "";
+  let foregroundUrl = `${ORIGIN}/`;
+  let foregroundLoading = false;
+  let foregroundDestroyed = false;
+  let workerCreations = 0;
   debuggerApi.isAttached = () => attached;
   debuggerApi.attach = () => { attached = true; };
   debuggerApi.sendCommand = async (command, params = {}) => {
     requests.push({ command, params });
-    if (command === "Page.getFrameTree") return { frameTree: { frame: { id: "main-frame" } } };
+    if (command === "Page.getFrameTree") return { frameTree: { frame: { id: "main-frame", loaderId: loader } } };
     if (command === "Network.getResponseBody") {
       if (options.body) return options.body(params.requestId, bodies);
       return { body: JSON.stringify(bodies.get(params.requestId)), base64Encoded: false };
@@ -91,12 +96,35 @@ function fixture(options = {}) {
     if (script.includes("function openConversation(")) return { status: "opened" };
     throw new Error("Unexpected page script");
   };
-  const context = { id: "account-a", platform: "xhs", disposed: false, capture: { active: false }, operation: { active: false }, view: { webContents: contents } };
+  foregroundContents.isDestroyed = () => foregroundDestroyed;
+  foregroundContents.getURL = () => foregroundUrl;
+  foregroundContents.isLoading = () => foregroundLoading;
+  foregroundContents.stop = () => { foregroundLoading = false; events.push({ foregroundStopped: true }); };
+  foregroundContents.setBackgroundThrottling = (value) => events.push({ foregroundThrottle: value });
+  foregroundContents.loadURL = async (nextUrl) => {
+    foregroundLoading = true;
+    foregroundUrl = nextUrl;
+    events.push({ foregroundNavigation: nextUrl });
+    const load = options.foregroundLoad || (api.service.getState(context.id).phase === "idle" ? options.load : null);
+    if (load) await load(nextUrl, { ...api, contents: foregroundContents, setUrl: (value) => { foregroundUrl = value; } });
+    foregroundLoading = false;
+    foregroundContents.emit("did-navigate", {}, nextUrl);
+  };
+  foregroundContents.executeJavaScript = (script) => contents.executeJavaScript(script);
+  const context = {
+    id: "account-a", platform: "xhs", disposed: false, session: {},
+    capture: { active: false }, operation: { active: false }, foregroundOperation: { active: false },
+    view: { webContents: foregroundContents },
+  };
+  contents.session = context.session;
+  foregroundContents.session = context.session;
   const api = {
-    contents, debuggerApi, context, events, accountEvents, scripts, requests, bodies,
+    contents, foregroundContents, debuggerApi, context, events, accountEvents, scripts, requests, bodies,
     get loader() { return loader; },
+    get workerCreations() { return workerCreations; },
     setUrl(value) { url = value; },
     setDestroyed(value) { destroyed = value; },
+    setForegroundDestroyed(value) { foregroundDestroyed = value; },
     request(request, overrides = {}) {
       const requestId = overrides.requestId || `users-${++bodyCount}`;
       debuggerApi.emit("message", {}, "Network.requestWillBeSent", {
@@ -119,6 +147,17 @@ function fixture(options = {}) {
     requireContext: (id) => {
       if (id !== context.id) throw new Error("No such account");
       return context;
+    },
+    createSearchWorker: (receivedContext) => {
+      workerCreations += 1;
+      assert.equal(receivedContext, context);
+      if (options.factoryError) throw new Error("factory failed");
+      return {
+        contents, ready: typeof options.workerReady === "function" ? options.workerReady() : options.workerReady || Promise.resolve(), isDestroyed: () => destroyed,
+        show: () => events.push({ workerShown: true }),
+        hide: () => events.push({ workerHidden: true }),
+        close: () => { destroyed = true; events.push({ workerClosed: true }); contents.emit("destroyed"); },
+      };
     },
     publishAccount: () => accountEvents.push({ ...context.operation }),
     onProgress: (state) => events.push({ progress: state }),
@@ -243,6 +282,8 @@ test("被动搜索网络和 DOM 合并去重，精确范围筛选，释放账号
   assert.equal(done.creators[0].relevance.status, "matched");
   assert.equal(api.context.operation.active, false);
   assert.deepEqual(api.events.filter((event) => "throttle" in event).map((event) => event.throttle), [false, true]);
+  assert.equal(api.foregroundContents.getURL(), `${ORIGIN}/`, "Background search never navigates the foreground");
+  assert.equal(api.events.some((event) => "foregroundThrottle" in event), false);
   assert.equal(api.debuggerApi.listenerCount("message"), 0);
   assert.equal(api.contents.listenerCount("did-navigate"), 0);
   assert.ok(done.revision > started.revision);
@@ -421,7 +462,7 @@ test("停止加载与慢响应可立即取消、释放锁且不发布陈旧结�
 
 test("任务初始失败、渲染失败、导航离开和平台限制均释放锁", async () => {
   const cases = [
-    { serviceOptions: { ensureNetworkCapture: async () => { throw new Error("attach failed"); } } },
+    { workerReady: () => Promise.reject(new Error("initialization failed")) },
     { load: async () => { throw new Error("navigation failed"); } },
     { execute: async () => { throw new Error("renderer failed"); } },
     { load: async (_url, host) => host.setUrl(data.searchUrl("穿搭")) },
@@ -439,7 +480,9 @@ test("任务初始失败、渲染失败、导航离开和平台限制均释放�
     assert.equal(api.debuggerApi.listenerCount("message"), 0);
   }
   const throttled = fixture({ throttleError: true });
-  await assert.rejects(throttled.service.search("account-a", { keyword: "美妆" }), /throttle failure/);
+  await throttled.service.search("account-a", { keyword: "美妆" });
+  await throttled.service.waitForIdle("account-a");
+  assert.equal(throttled.service.getState("account-a").phase, "paused");
   assert.equal(throttled.context.operation.active, false);
 });
 
@@ -448,6 +491,7 @@ test("采集、待开始采集、其他操作互斥且不改写他人的锁", as
     (context) => { context.capture.active = true; },
     (context) => { context.capture.pendingStartRunId = "capture"; },
     (context) => { context.operation = { active: true, kind: "direct-message" }; },
+    (context) => { context.foregroundOperation = { active: true, kind: "creator-profile" }; },
   ]) {
     const api = fixture();
     change(api.context);
@@ -480,13 +524,15 @@ test("私信入口仅打开并确认同一达人会话，允许安全恢复的�
   const api = fixture();
   const result = await api.service.openConversation("account-a", { userId: USER_A, nickname: "达人", profileUrl: `${ORIGIN}/user/profile/${USER_A}` });
   assert.equal(result.status, "opened");
-  assert.equal(result.url, api.contents.getURL());
+  assert.equal(result.url, api.foregroundContents.getURL());
   assert.equal(api.context.operation.active, false);
+  assert.equal(api.context.foregroundOperation.active, false);
   assert.ok(api.scripts.some((script) => script.includes("function openConversation(")));
   assert.ok(api.scripts.some((script) => script.includes("function confirmConversation(")));
   assert.ok(api.scripts.every((script) => !script.includes("function prepareMessage(") && !script.includes("function submitMessage(")
     && !script.includes('execCommand("insertText"') && !script.includes('dispatchEvent(new InputEvent')));
-  assert.equal(api.events.filter((event) => event.navigation).length, 1);
+  assert.equal(api.events.filter((event) => event.foregroundNavigation).length, 1);
+  assert.equal(api.workerCreations, 0);
 });
 
 test("入口点击成功但错误收件人、限制、错页和取消不报告私信已打开", async () => {
@@ -502,7 +548,221 @@ test("入口点击成功但错误收件人、限制、错页和取消不报告�
   const waiting = fixture({ execute: async (script) => script.includes("function openConversation(") ? { status: "opened" } : { status: "waiting" } });
   const job = waiting.service.openConversation("account-a", { userId: USER_A, profileUrl: `${ORIGIN}/user/profile/${USER_A}` });
   await pause();
-  waiting.service.stop("account-a");
+  await waiting.service.dispose("account-a");
   await assert.rejects(job, /取消/);
-  assert.equal(waiting.context.operation.active, false);
+  assert.equal(waiting.context.foregroundOperation.active, false);
+});
+
+test("后台搜索与前台主页/私信各自持锁，人工导航不触发后台页面 guard", async () => {
+  const navigation = deferred();
+  const api = fixture({ load: () => navigation.promise });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await pause();
+  const before = api.service.getState("account-a");
+  const operation = api.context.operation;
+  const profile = { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) };
+  assert.equal((await api.service.openProfile("account-a", profile)).status, "opened");
+  assert.equal(api.context.operation, operation);
+  assert.equal(api.context.foregroundOperation.active, false);
+  assert.deepEqual(api.service.getState("account-a"), before, "Foreground operations never overwrite discovery state");
+  const opened = await api.service.openConversation("account-a", profile);
+  assert.equal(opened.status, "opened");
+  assert.equal(api.context.operation, operation);
+  await api.foregroundContents.loadURL(`${ORIGIN}/explore/${NOTE_A}`);
+  assert.equal(api.service.getState("account-a").phase, "searching");
+  api.service.stop("account-a");
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.foregroundContents.getURL(), `${ORIGIN}/explore/${NOTE_A}`);
+  assert.equal(api.events.some((event) => event.foregroundStopped || "foregroundThrottle" in event), false);
+  assert.equal(api.service.getState("account-a").runId, before.runId);
+  navigation.resolve();
+});
+
+test("停止后台搜索不取消正在打开的前台聊天，也不覆盖其锁", async () => {
+  const navigation = deferred();
+  const foregroundNavigation = deferred();
+  const api = fixture({ load: () => navigation.promise, foregroundLoad: () => foregroundNavigation.promise });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await pause();
+  const job = api.service.openConversation("account-a", { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) });
+  await pause();
+  const foregroundOperation = api.context.foregroundOperation;
+  await assert.rejects(api.service.openProfile("account-a", { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) }), /正在采集或执行/);
+  api.service.stop("account-a");
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.context.foregroundOperation, foregroundOperation);
+  assert.equal(api.context.foregroundOperation.active, true);
+  assert.equal(api.events.some((event) => event.foregroundStopped), false);
+  foregroundNavigation.resolve();
+  assert.equal((await job).status, "opened");
+  assert.equal(api.service.getState("account-a").phase, "stopped");
+  assert.equal(api.context.foregroundOperation.active, false);
+  navigation.resolve();
+});
+
+test("前台单独打开不创建搜索任务，且拒绝自动采集/私信及正在打开的前台操作", async () => {
+  for (const change of [
+    (context) => { context.capture.active = true; },
+    (context) => { context.capture.pendingStartRunId = "capture"; },
+    (context) => { context.operation = { active: true, kind: "direct-message" }; },
+    (context) => { context.foregroundOperation = { active: true, kind: "creator-profile" }; },
+  ]) {
+    const api = fixture();
+    change(api.context);
+    await assert.rejects(api.service.openProfile("account-a", { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) }), /正在采集或执行/);
+    assert.equal(api.events.some((event) => event.foregroundNavigation), false);
+  }
+  const api = fixture();
+  const before = api.service.getState("account-a");
+  await api.service.openProfile("account-a", { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) });
+  assert.deepEqual(api.service.getState("account-a"), before);
+  assert.equal(api.workerCreations, 0);
+});
+
+test("任务检查页只显示原 worker，重搜复用并隐藏，不导航前台", async () => {
+  const api = fixture();
+  await assert.rejects(api.service.openTaskPage("account-a"), /尚无/);
+  await api.service.search("account-a", { keyword: "美妆" });
+  await api.service.waitForIdle("account-a");
+  const stateBefore = api.service.getState("account-a");
+  const url = api.contents.getURL();
+  assert.deepEqual(await api.service.openTaskPage("account-a"), { status: "opened", url });
+  assert.equal(api.contents.getURL(), url);
+  assert.deepEqual(api.service.getState("account-a"), stateBefore);
+  await api.service.search("account-a", { keyword: "美妆" });
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.workerCreations, 1);
+  assert.equal(api.events.filter((event) => event.workerShown).length, 1);
+  assert.equal(api.events.filter((event) => event.workerHidden).length, 2);
+  assert.equal(api.foregroundContents.getURL(), `${ORIGIN}/`);
+  await api.service.dispose("account-a");
+  assert.equal(api.events.filter((event) => event.workerClosed).length, 1);
+});
+
+test("初始化与双通道加载中 dispose 均立即取消、关闭 worker 并释放各自锁", async () => {
+  const ready = deferred();
+  const initializing = fixture({ workerReady: ready.promise });
+  await initializing.service.search("account-a", { keyword: "美妆" });
+  initializing.context.disposed = true;
+  await initializing.service.dispose("account-a");
+  assert.equal(initializing.context.operation.active, false);
+  assert.ok(initializing.events.some((event) => event.workerClosed));
+  ready.resolve();
+  await pause();
+  assert.equal(initializing.events.some((event) => event.navigation), false);
+  const background = deferred();
+  const foreground = deferred();
+  const api = fixture({ load: () => background.promise, foregroundLoad: () => foreground.promise });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await pause();
+  const job = api.service.openConversation("account-a", { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) });
+  const rejected = assert.rejects(job, /取消/);
+  api.context.disposed = true;
+  await api.service.dispose("account-a");
+  await rejected;
+  assert.equal(api.context.operation.active, false);
+  assert.equal(api.context.foregroundOperation.active, false);
+  assert.ok(api.events.some((event) => event.foregroundStopped));
+  assert.ok(api.events.some((event) => event.workerClosed));
+  assert.equal(api.debuggerApi.listenerCount("message"), 0);
+  background.resolve();
+  foreground.resolve();
+  await pause();
+  assert.equal(api.service.getState("account-a").phase, "idle");
+});
+
+test("worker 创建失败、共享前台 contents 或跨账号 session 都 fail closed 并释放锁", async () => {
+  const factoryFailure = fixture({ factoryError: true });
+  await assert.rejects(factoryFailure.service.search("account-a", { keyword: "美妆" }), /factory failed/);
+  assert.equal(factoryFailure.context.operation.active, false);
+  for (const wrongContents of ["foreground", "session"]) {
+    let closed = false;
+    const api = fixture({
+      serviceOptions: {
+        createSearchWorker: (context) => ({
+          contents: wrongContents === "foreground" ? context.view.webContents : { session: {} },
+          ready: Promise.resolve(), isDestroyed: () => false, show() {}, close() { closed = true; },
+        }),
+      },
+    });
+    await assert.rejects(api.service.search("account-a", { keyword: "美妆" }), /独立浏览会话/);
+    assert.equal(api.context.operation.active, false);
+    assert.equal(api.context.foregroundOperation.active, false);
+    assert.equal(closed, true);
+  }
+});
+
+test("后台崩溃与搜索文档 HTTP429 保守暂停，前台聊天页保持不动", async () => {
+  const pending = deferred();
+  const api = fixture({ load: () => pending.promise });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await pause();
+  await api.service.openConversation("account-a", { userId: USER_A, profileUrl: data.publicProfileUrl(USER_A) });
+  const foregroundUrl = api.foregroundContents.getURL();
+  api.contents.emit("render-process-gone", {}, { reason: "crashed" });
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.service.getState("account-a").phase, "paused");
+  assert.equal(api.context.operation.active, false);
+  assert.equal(api.foregroundContents.getURL(), foregroundUrl);
+  pending.resolve();
+  const limited = fixture({
+    load: async (url, host) => host.debuggerApi.emit("message", {}, "Network.responseReceived", {
+      type: "Document", frameId: "main-frame", loaderId: host.loader, requestId: `document-${host.loader}`,
+      response: { url, status: 429, mimeType: "text/html" },
+    }),
+  });
+  await limited.service.search("account-a", { keyword: "美妆" });
+  await limited.service.waitForIdle("account-a");
+  assert.equal(limited.service.getState("account-a").phase, "paused");
+  assert.equal(limited.service.getState("account-a").checked, 0);
+});
+
+test("阶段切换后迟到的导航事件/搜索响应不能覆盖当前主页身份", async () => {
+  const api = fixture({
+    rows: [{ userId: USER_A, followers: 5000 }],
+    profile: (userId, host) => {
+      host.contents.emit("did-navigate", {}, data.searchUrl("美妆"));
+      host.debuggerApi.emit("message", {}, "Network.requestWillBeSent", {
+        type: "Document", frameId: "main-frame", loaderId: "old-search-loader", requestId: "old-document",
+        request: { url: data.searchUrl("美妆") },
+      });
+      return {
+        pageMatches: true, profileReady: true, userId, authoredConfirmed: true,
+        creator: { userId, profileUrl: data.publicProfileUrl(userId), description: "美妆", tags: ["美妆"], followers: 5000 },
+        notes: [1, 2, 3].map((index) => ({
+          id: `65b20000000000000000000${index}`, title: `美妆护肤教程${index}`, authorId: userId, source: "profile",
+        })),
+      };
+    },
+  });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.service.getState("account-a").phase, "completed");
+  assert.equal(api.service.getState("account-a").creators.length, 1);
+});
+
+test("当前主页同主frame/loader的公开API限制立即暂停，不继续批量核验", async () => {
+  const api = fixture({
+    rows: [{ userId: USER_A }, { userId: USER_B }],
+    loadProfiles: true,
+    load: async (url, host) => {
+      const userId = data.profileId(url);
+      if (!userId) return;
+      const response = {
+        requestId: "profile-api", type: "Fetch", frameId: "main-frame", loaderId: host.loader,
+        response: { url: `${ORIGIN}/api/sns/web/v1/user_posted?user_id=${userId}`, status: 429, mimeType: "application/json" },
+      };
+      host.debuggerApi.emit("message", {}, "Network.responseReceived", { ...response, frameId: "foreign-frame" });
+      host.debuggerApi.emit("message", {}, "Network.responseReceived", { ...response, loaderId: "foreign-loader" });
+      assert.equal(host.service.getState("account-a").phase, "searching");
+      host.debuggerApi.emit("message", {}, "Network.responseReceived", response);
+    },
+  });
+  await api.service.search("account-a", { keyword: "美妆" });
+  await api.service.waitForIdle("account-a");
+  assert.equal(api.service.getState("account-a").phase, "paused");
+  assert.equal(api.context.operation.active, false);
+  assert.equal(api.events.filter((event) => event.navigation && data.profileId(event.navigation)).length, 1);
+  assert.equal(api.requests.filter((request) => request.command === "Network.getResponseBody").length, 0);
+  assert.equal(api.events.some((event) => event.stopped), false, "Platform restrictions pause automation without interrupting the original verification page");
 });

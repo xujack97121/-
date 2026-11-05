@@ -26,6 +26,7 @@
 .creator-run-status svg, .creator-error svg { flex: 0 0 auto; margin-top: 1px; }
 .creator-error, .creator-run-status.is-error { color: var(--danger); }
 .creator-error { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0; font-size: 12px; line-height: 1.5; }
+.creator-navigation-error { flex: 1 0 100%; min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .creator-list { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 2px 4px 6px 2px; overflow-y: auto; list-style: none; scrollbar-gutter: stable; }
 .creator-card { flex: 0 0 auto; min-width: 0; display: grid; grid-template-columns: 44px minmax(0, 1fr) 82px; align-items: start; gap: 12px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--cream-50); }
 .creator-avatar { position: relative; width: 44px; height: 44px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border-radius: 50%; color: var(--muted); background: var(--cream-200); }
@@ -53,7 +54,9 @@
 .creator-more-evidence summary { width: fit-content; padding-block: 3px; color: var(--coral-deep); cursor: pointer; }
 .creator-more-evidence summary:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; }
 .creator-stats { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 7px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; line-height: 1.5; }
-.creator-message-button { align-self: center; width: 82px; min-height: 34px; color: var(--coral-deep); }
+.creator-card-actions { display: grid; align-self: start; gap: 6px; width: 82px; }
+.creator-profile-button, .creator-message-button { width: 82px; min-height: 34px; }
+.creator-message-button { color: var(--coral-deep); }
 .creator-empty { flex: 1 0 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px 12px; color: var(--muted); text-align: center; }
 .creator-empty strong { font-size: 13px; font-weight: 500; line-height: 1.6; }
 .creator-spinner { animation: creator-spin 1s linear infinite; }
@@ -62,7 +65,7 @@
   .creator-panel { padding: 12px; }
   .creator-card { grid-template-columns: 36px minmax(0, 1fr); gap: 10px; padding: 10px; }
   .creator-avatar, .creator-avatar img { width: 36px; height: 36px; }
-  .creator-message-button { grid-column: 2; justify-self: end; }
+  .creator-card-actions { grid-column: 2; justify-self: end; display: flex; justify-content: flex-end; flex-wrap: wrap; width: auto; }
   .creator-custom-range { flex: 1 1 100%; }
 }
 @media (max-height: 600px) {

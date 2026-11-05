@@ -8,13 +8,16 @@ const BODY_LIMIT = 2 * 1024 * 1024;
 const CANCELLED = Symbol("creator-task-cancelled");
 
 function createCreatorDiscovery({
-  requireContext, publishAccount = () => {}, onProgress = () => {}, ensureNetworkCapture,
+  requireContext, createSearchWorker, publishAccount = () => {}, onProgress = () => {},
   pollIntervalMs = 400, searchTimeoutMs = 45000, navigationTimeoutMs = 20000,
   conversationTimeoutMs = 12000, initialWaitMs = 6000, scrollIntervalMs = 2200, maxScrolls = 24,
   profileIntervalMs = 2200, profileSettleMs = 1200, profileTimeoutMs = 7000,
   maxCandidates = 120, verificationTimeoutMs = 8 * 60 * 1000,
 }) {
   const states = new Map();
+  const workers = new Map();
+  const foregroundRuns = new Map();
+  const foregroundJobs = new Map();
   const notifyAccount = (context) => { try { publishAccount(context); } catch { /* UI notification cannot retain an operation lock. */ } };
   const checkedContext = (accountId) => {
     const context = requireContext(accountId);
@@ -46,8 +49,10 @@ function createCreatorDiscovery({
     current.revision += 1;
     try { onProgress(snapshot(current.accountId)); } catch { /* Preserve task lifecycle when the renderer closes. */ }
   };
-  const alive = (run) => !run.cancelled && !run.context.disposed && !run.contents.isDestroyed()
-    && states.get(run.accountId) === run.state && run.state.run === run && run.context.operation === run.operation;
+  const ownsRun = (run) => (run.foreground
+      ? foregroundRuns.get(run.accountId) === run && run.context.foregroundOperation === run.operation
+      : states.get(run.accountId) === run.state && run.state.run === run && run.context.operation === run.operation);
+  const alive = (run) => ownsRun(run) && !run.cancelled && !run.context.disposed && !run.contents.isDestroyed();
   const check = (run) => { if (!alive(run)) throw CANCELLED; };
   const step = async (run, promise, timeoutMs = navigationTimeoutMs) => {
     check(run);
@@ -74,36 +79,85 @@ function createCreatorDiscovery({
     } finally { clearTimeout(timer); }
   };
   const lock = (context, kind) => {
-    if (context.capture?.active || context.capture?.pendingStartRunId || context.operation?.active) throw new Error("该账号正在采集或执行其他操作，请先停止当前任务");
-    const operation = { active: true, kind, runId: randomUUID(), startedAt: Date.now() };
+    if (context.capture?.active || context.capture?.pendingStartRunId || context.operation?.active
+      || context.foregroundOperation?.active) throw new Error("该账号正在采集或执行其他操作，请先停止当前任务");
+    const operation = { active: true, kind, target: "background", runId: randomUUID(), startedAt: Date.now() };
     context.operation = operation;
-    try { context.view.webContents.setBackgroundThrottling(false); } catch (error) {
-      if (context.operation === operation) context.operation = { active: false, runId: "", startedAt: 0 };
-      throw error;
+    notifyAccount(context);
+    return operation;
+  };
+  const lockForeground = (context, kind) => {
+    if (context.capture?.active || context.capture?.pendingStartRunId || context.foregroundOperation?.active
+      || context.operation?.active && context.operation.kind !== "creator-search") {
+      throw new Error("该账号正在采集或执行其他操作，请稍后重试");
     }
+    const operation = { active: true, kind, target: "foreground", runId: randomUUID(), startedAt: Date.now() };
+    context.foregroundOperation = operation;
     notifyAccount(context);
     return operation;
   };
   const unlock = (run) => {
-    const { context, contents } = run;
-    if (context.operation !== run.operation) return;
-    context.operation = { active: false, runId: "", startedAt: 0 };
-    if (!context.disposed && !contents.isDestroyed()) {
-      try { contents.setBackgroundThrottling(true); } catch { /* Account may close between checks. */ }
-      notifyAccount(context);
-    }
+    const { context } = run;
+    const key = run.foreground ? "foregroundOperation" : "operation";
+    if (context[key] !== run.operation) return;
+    context[key] = { active: false, kind: "", runId: "", startedAt: 0 };
+    if (!context.disposed) notifyAccount(context);
   };
-  const makeRun = (current, context, operation) => {
+  const makeRun = (current, context, operation, contents, foreground = false) => {
     let cancel;
     const run = {
-      accountId: current.accountId, state: current, context, contents: context.view.webContents,
+      accountId: context.id, state: current, context, contents, foreground,
       operation, cancelled: false, cancelPromise: new Promise((resolve) => { cancel = resolve; }),
       cleanup: [], requests: new Map(), responses: new Map(), pendingBodies: new Set(),
       mainFrameId: "", documentLoaderId: "", navigating: false, documentReady: false,
-      stage: "collecting", currentProfileId: "",
+      stage: "collecting", currentProfileId: "", navigationEpoch: 0, expectedUrl: "",
     };
     run.cancel = () => { run.cancelled = true; cancel(); };
     return run;
+  };
+  const getWorker = (context) => {
+    const existing = workers.get(context.id);
+    if (existing?.context === context && existing.host.canReuse?.() !== false
+      && !existing.host.isDestroyed() && !existing.host.contents.isDestroyed()) return existing.host;
+    if (existing) { existing.host.close(); workers.delete(context.id); }
+    if (typeof createSearchWorker !== "function") throw new Error("后台搜索页面尚未配置");
+    const host = createSearchWorker(context);
+    if (!context.session || !host?.contents || host.contents === context.view.webContents || host.contents.session !== context.session
+      || typeof host.show !== "function" || typeof host.close !== "function" || typeof host.isDestroyed !== "function") {
+      host?.close?.();
+      throw new Error("后台搜索页面必须使用该账号的独立浏览会话");
+    }
+    workers.set(context.id, { context, host });
+    return host;
+  };
+  const navigate = async (run, url, stage, userId = "") => {
+    check(run);
+    run.navigationEpoch += 1;
+    run.stage = stage;
+    run.currentProfileId = userId;
+    run.expectedUrl = url;
+    run.documentLoaderId = "";
+    run.documentRequestId = "";
+    run.requests.clear();
+    run.responses.clear();
+    await step(run, run.contents.loadURL(url));
+    if (!matchesRunPage(run, run.contents.getURL())) throw new Error("后台任务页面身份已变化，请检查任务页面后重试");
+  };
+  const readPage = async (run, script) => {
+    const epoch = run.navigationEpoch;
+    const loader = run.documentLoaderId;
+    const result = await step(run, run.contents.executeJavaScript(script), 5000);
+    if (epoch !== run.navigationEpoch || loader !== run.documentLoaderId || !matchesRunPage(run, run.contents.getURL())) {
+      failRun(run, "后台任务页面已变化，已停止使用旧页面内容");
+      throw CANCELLED;
+    }
+    const tree = await step(run, run.contents.debugger.sendCommand("Page.getFrameTree"), 3000);
+    const frame = tree?.frameTree?.frame;
+    if (frame?.id && frame.id !== run.mainFrameId || frame?.loaderId && loader && frame.loaderId !== loader) {
+      failRun(run, "后台页面已重新导航，已停止使用旧页面内容");
+      throw CANCELLED;
+    }
+    return result;
   };
   const ingest = (run, rows) => {
     if (!alive(run) || run.stage !== "collecting") return 0;
@@ -127,9 +181,9 @@ function createCreatorDiscovery({
     return changed ? 1 : 0;
   };
   const matchesRunPage = (run, url) => run.stage === "collecting"
-    ? data.isCreatorSearchPage(url, run.state.keyword) : data.profileId(url) === run.currentProfileId;
+    ? data.isCreatorSearchPage(url, run.state.keyword) : Boolean(run.currentProfileId) && data.profileId(url) === run.currentProfileId;
   const failRun = (run, message) => {
-    if (!alive(run)) return;
+    if (!ownsRun(run) || run.cancelled) return;
     run.failure = message;
     run.cancel();
   };
@@ -137,27 +191,41 @@ function createCreatorDiscovery({
     if (!alive(run) || !run.navigating) return;
     if (method === "Network.requestWillBeSent") {
       if (params.type === "Document" && params.frameId === run.mainFrameId) {
-        run.requests.clear();
-        run.responses.clear();
-        run.documentLoaderId = matchesRunPage(run, params.request?.url) ? params.loaderId || "" : "";
-        run.documentRequestId = params.requestId;
+        if (matchesRunPage(run, params.request?.url) && (!run.documentRequestId || params.requestId === run.documentRequestId)) {
+          run.documentLoaderId = params.loaderId || "";
+          run.documentRequestId = params.requestId;
+        }
         return;
       }
       if (run.stage !== "collecting" || !run.documentLoaderId || params.frameId !== run.mainFrameId || params.loaderId !== run.documentLoaderId
         || !data.isCreatorSearchPage(params.documentURL, run.state.keyword)
         || !data.isCreatorSearchRequest(params.request, run.state.keyword)) return;
-      run.requests.set(params.requestId, { url: params.request.url, loaderId: run.documentLoaderId });
+      run.requests.set(params.requestId, { url: params.request.url, loaderId: run.documentLoaderId, epoch: run.navigationEpoch });
     }
     if (method === "Network.responseReceived") {
-      if (run.stage === "checking" && params.type === "Document" && params.frameId === run.mainFrameId
+      if (run.stage === "checking" && params.frameId === run.mainFrameId && params.loaderId === run.documentLoaderId
+        && matchesRunPage(run, run.contents.getURL()) && [401, 403, 429].includes(params.response?.status)) {
+        let limitedApi = false;
+        try {
+          const url = new URL(params.response.url);
+          limitedApi = url.protocol === "https:" && !url.username && !url.password && !url.port
+            && (url.hostname === "xiaohongshu.com" || url.hostname.endsWith(".xiaohongshu.com"))
+            && url.pathname.startsWith("/api/");
+        } catch { /* Only a scoped platform API can pause profile checking. */ }
+        if (limitedApi) {
+          failRun(run, "平台限制了公开主页内容访问，已暂停核验，请检查后台任务页面后重试");
+          return;
+        }
+      }
+      if (params.type === "Document" && params.frameId === run.mainFrameId
         && params.loaderId === run.documentLoaderId && params.requestId === run.documentRequestId
-        && data.profileId(params.response?.url) === run.currentProfileId
+        && matchesRunPage(run, params.response?.url)
         && [401, 403, 429].includes(params.response?.status)) {
-        failRun(run, "平台限制了公开主页访问，已暂停核验，请检查账号登录、验证或访问限制后重试");
+        failRun(run, "平台限制了后台任务访问，已暂停搜索，请检查任务页面中的登录、验证或访问限制后重试");
         return;
       }
       const request = run.requests.get(params.requestId);
-      if (run.stage !== "collecting" || !request || request.loaderId !== run.documentLoaderId || params.loaderId !== request.loaderId
+      if (run.stage !== "collecting" || !request || request.epoch !== run.navigationEpoch || request.loaderId !== run.documentLoaderId || params.loaderId !== request.loaderId
         || params.frameId !== run.mainFrameId || !data.isCreatorSearchPage(run.contents.getURL(), run.state.keyword)
         || params.response?.url !== request.url) return;
       if ([401, 403, 429].includes(params.response.status)) {
@@ -175,7 +243,8 @@ function createCreatorDiscovery({
       if (!request || params.encodedDataLength > BODY_LIMIT) return;
       const pending = (async () => {
         const result = await step(run, run.contents.debugger.sendCommand("Network.getResponseBody", { requestId: params.requestId }), 5000);
-        if (run.stage !== "collecting" || request.loaderId !== run.documentLoaderId || !data.isCreatorSearchPage(run.contents.getURL(), run.state.keyword)) return;
+        if (run.stage !== "collecting" || request.epoch !== run.navigationEpoch || request.loaderId !== run.documentLoaderId
+          || !data.isCreatorSearchPage(run.contents.getURL(), run.state.keyword)) return;
         if (typeof result.body !== "string" || result.body.length > BODY_LIMIT * 1.4) return;
         const body = result.base64Encoded ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
         if (Buffer.byteLength(body, "utf8") > BODY_LIMIT) return;
@@ -203,7 +272,9 @@ function createCreatorDiscovery({
     const navigated = (event, legacyUrl, legacyMainFrame = true) => {
       if ((event?.isMainFrame ?? legacyMainFrame) === false || !alive(run) || !run.navigating) return;
       const url = event?.url ?? legacyUrl ?? run.contents.getURL();
-      if (!matchesRunPage(run, url)) failRun(run, "已离开本次达人核验页面，搜索已停止");
+      if (!matchesRunPage(run, url) && !matchesRunPage(run, run.contents.getURL())) {
+        failRun(run, "后台任务页已离开本次达人核验页面，搜索已暂停");
+      }
     };
     const documentNavigated = (_event, url) => navigated({ isMainFrame: true }, url);
     run.contents.on("did-navigate", documentNavigated);
@@ -213,6 +284,11 @@ function createCreatorDiscovery({
     const detached = () => failRun(run, "页面监听已断开，已保留当前达人结果，请重新搜索");
     run.contents.debugger.on("detach", detached);
     run.cleanup.push(() => run.contents.debugger.removeListener("detach", detached));
+    const destroyed = () => failRun(run, "后台任务页面已关闭，已保留当前达人结果，请重新搜索");
+    run.contents.on("destroyed", destroyed);
+    run.contents.on("render-process-gone", destroyed);
+    run.cleanup.push(() => run.contents.removeListener("destroyed", destroyed));
+    run.cleanup.push(() => run.contents.removeListener("render-process-gone", destroyed));
   };
   const cleanup = (run) => {
     for (const remove of run.cleanup.splice(0)) { try { remove(); } catch { /* Host may already be disposed. */ } }
@@ -222,11 +298,7 @@ function createCreatorDiscovery({
   };
   async function checkCandidate(run, candidate) {
     check(run);
-    run.currentProfileId = candidate.userId;
-    run.documentLoaderId = "";
-    run.requests.clear();
-    run.responses.clear();
-    await step(run, run.contents.loadURL(candidate.profileUrl));
+    await navigate(run, candidate.profileUrl, "checking", candidate.userId);
     if (data.profileId(run.contents.getURL()) !== candidate.userId) throw new Error("候选作者主页身份不匹配");
     const startedAt = Date.now();
     let evidence = null;
@@ -235,7 +307,7 @@ function createCreatorDiscovery({
     while (Date.now() - startedAt < profileTimeoutMs) {
       check(run);
       if (data.profileId(run.contents.getURL()) !== candidate.userId) throw new Error("作者主页身份已变化");
-      const result = await step(run, run.contents.executeJavaScript(page.readCreatorProfileScript({ userId: candidate.userId, maxNotes: 8 })), 5000);
+      const result = await readPage(run, page.readCreatorProfileScript({ userId: candidate.userId, maxNotes: 8 }));
       if (result?.blocked) { failRun(run, result.blocked); throw CANCELLED; }
       if (result?.pageMatches === false) throw new Error("公开主页身份无法确认");
       const current = data.normalizeProfileEvidence(result, candidate.userId);
@@ -297,18 +369,19 @@ function createCreatorDiscovery({
   async function runSearch(run) {
     const current = run.state;
     try {
-      if (ensureNetworkCapture) await step(run, ensureNetworkCapture(run.context));
-      else {
-        if (!run.contents.debugger.isAttached()) run.contents.debugger.attach("1.3");
-        await step(run, run.contents.debugger.sendCommand("Network.enable", { maxTotalBufferSize: 8 * BODY_LIMIT, maxResourceBufferSize: BODY_LIMIT }));
-      }
+      run.worker.hide?.();
+      await step(run, run.worker.ready);
+      run.workerReady = true;
+      run.contents.setBackgroundThrottling(false);
+      if (!run.contents.debugger.isAttached()) run.contents.debugger.attach("1.3");
+      await step(run, run.contents.debugger.sendCommand("Network.enable", { maxTotalBufferSize: 8 * BODY_LIMIT, maxResourceBufferSize: BODY_LIMIT }));
       try {
         const tree = await step(run, run.contents.debugger.sendCommand("Page.getFrameTree"), 3000);
         run.mainFrameId = tree?.frameTree?.frame?.id || "";
       } catch (error) { if (error === CANCELLED) throw error; }
       listen(run);
       run.navigating = true;
-      await step(run, run.contents.loadURL(data.searchUrl(current.keyword)));
+      await navigate(run, data.searchUrl(current.keyword), "collecting");
       if (!data.isCreatorSearchPage(run.contents.getURL(), current.keyword)) throw new Error("未进入达人搜索页面，请检查账号登录或平台验证");
       run.documentReady = true;
       let stalls = 0;
@@ -320,7 +393,7 @@ function createCreatorDiscovery({
       while (Date.now() < until) {
         check(run);
         if (!data.isCreatorSearchPage(run.contents.getURL(), current.keyword)) throw new Error("已离开本次达人搜索页面，搜索已停止");
-        const visible = await step(run, run.contents.executeJavaScript(page.readCreatorSearchScript({ keyword: current.keyword })), 5000);
+        const visible = await readPage(run, page.readCreatorSearchScript({ keyword: current.keyword }));
         if (!visible?.pageMatches) throw new Error("搜索页面已变化，请重新搜索");
         if (visible.blocked) throw new Error(visible.blocked);
         ingest(run, Array.isArray(visible.rows) ? visible.rows : []);
@@ -349,7 +422,20 @@ function createCreatorDiscovery({
       current.phase = error === CANCELLED && !run.failure ? "stopped" : "paused";
       current.message = run.failure || (error === CANCELLED ? "搜索已停止，已保留当前达人结果" : error.message || "达人搜索失败，请重试");
     } finally {
+      if (!run.failure && !run.cancelled && !run.contents.isDestroyed() && run.contents.isLoading()) {
+        try { run.contents.stop(); } catch { /* Only the task worker is stopped here. */ }
+      }
+      if (!run.contents.isDestroyed()) {
+        try { run.contents.setBackgroundThrottling(true); } catch { /* Worker may have crashed during cleanup. */ }
+      }
       cleanup(run);
+      if (!run.workerReady) {
+        const worker = workers.get(run.accountId);
+        if (worker?.host === run.worker) {
+          workers.delete(run.accountId);
+          try { worker.host.close(); } catch { /* Initialization failure must still release the task lock. */ }
+        }
+      }
       if (states.get(run.accountId) === current && current.run === run) {
         current.active = false;
         current.run = null;
@@ -363,12 +449,18 @@ function createCreatorDiscovery({
     const current = state(accountId);
     if (current.active) throw new Error("该账号正在查找达人，请先停止当前搜索");
     const operation = lock(context, "creator-search");
+    let worker;
+    try { worker = getWorker(context); } catch (error) {
+      unlock({ context, operation, foreground: false });
+      throw error;
+    }
     Object.assign(current, settings, {
       runId: operation.runId, phase: "searching", active: true, creators: new Map(), candidates: new Map(), scanned: 0,
       stage: "collecting", checked: 0, rejected: 0, insufficient: 0,
       message: "正在通过公开笔记搜索收集候选作者，随后核验简介、标签和公开内容",
     });
-    const run = makeRun(current, context, operation);
+    const run = makeRun(current, context, operation, worker.contents);
+    run.worker = worker;
     run.candidateLimit = Math.max(1, Math.min(maxCandidates, Math.max(30, current.limit * 3)));
     current.run = run;
     publish(current);
@@ -380,25 +472,55 @@ function createCreatorDiscovery({
     const run = current.run;
     if (run && current.active) {
       run.cancel();
-      if (!run.context.disposed && !run.contents.isDestroyed() && run.contents.isLoading()) {
+      if (!run.contents.isDestroyed() && run.contents.isLoading()) {
         try { run.contents.stop(); } catch { /* Closing page is already cancelled. */ }
       }
-      current.message = run.operation.kind === "creator-conversation" ? "正在停止打开私信" : "正在停止达人搜索";
+      current.message = "正在停止达人搜索";
       publish(current);
     }
     return snapshot(accountId);
   }
-  async function openConversation(accountId, input) {
+  function foregroundAction(accountId, input, kind, action) {
     const creator = data.validateCreator(input);
     const context = checkedContext(accountId);
-    const current = state(accountId);
-    if (current.active) throw new Error("请先停止达人搜索后再打开私信");
-    const operation = lock(context, "creator-conversation");
-    const run = makeRun(current, context, operation);
-    current.run = run;
-    current.active = true;
+    const operation = lockForeground(context, kind);
+    const run = makeRun(null, context, operation, context.view.webContents, true);
+    foregroundRuns.set(accountId, run);
+    const destroyed = () => failRun(run, "账号页面已关闭");
+    run.contents.on("destroyed", destroyed);
+    run.contents.on("render-process-gone", destroyed);
+    run.cleanup.push(() => run.contents.removeListener("destroyed", destroyed));
+    run.cleanup.push(() => run.contents.removeListener("render-process-gone", destroyed));
     const job = (async () => {
+      let completed = false;
       try {
+        const result = await action(run, creator);
+        completed = true;
+        return result;
+      } catch (error) {
+        throw new Error(error === CANCELLED ? "前台打开操作已取消" : error.message || "打开达人页面失败");
+      } finally {
+        if (!completed && !run.contents.isDestroyed() && run.contents.isLoading()) {
+          try { run.contents.stop(); } catch { /* Account teardown may already be underway. */ }
+        }
+        cleanup(run);
+        if (foregroundRuns.get(accountId) === run) foregroundRuns.delete(accountId);
+      }
+    })();
+    foregroundJobs.set(accountId, job);
+    const finished = () => { if (foregroundJobs.get(accountId) === job) foregroundJobs.delete(accountId); };
+    job.then(finished, finished);
+    return job;
+  }
+  async function openProfile(accountId, input) {
+    return foregroundAction(accountId, input, "creator-profile", async (run, creator) => {
+      await step(run, run.contents.loadURL(creator.profileUrl));
+      if (data.profileId(run.contents.getURL()) !== creator.userId) throw new Error("达人主页身份不匹配，未打开主页");
+      return { status: "opened", ...creator, url: run.contents.getURL() };
+    });
+  }
+  async function openConversation(accountId, input) {
+    return foregroundAction(accountId, input, "creator-conversation", async (run, creator) => {
         await step(run, run.contents.loadURL(creator.profileUrl));
         if (data.profileId(run.contents.getURL()) !== creator.userId) throw new Error("达人主页身份不匹配，未打开私信");
         const until = Date.now() + conversationTimeoutMs;
@@ -419,28 +541,39 @@ function createCreatorDiscovery({
           await delay(run, Math.min(250, pollIntervalMs));
         }
         throw new Error(clicked ? "未能确认该达人的私信会话，请在账号页面检查私信权限" : "该达人没有可用的私信入口，请在账号页面检查");
-      } catch (error) {
-        throw new Error(error === CANCELLED ? "打开私信已取消" : error.message || "打开达人私信失败");
-      } finally {
-        cleanup(run);
-        if (current.run === run) {
-          current.active = false;
-          current.run = null;
-          publish(current);
-        }
-      }
-    })();
-    current.job = job;
-    return job;
+    });
+  }
+  async function openTaskPage(accountId) {
+    const context = checkedContext(accountId);
+    const worker = workers.get(accountId);
+    if (worker?.context !== context || worker.host.isDestroyed() || worker.host.contents.isDestroyed()) {
+      throw new Error("尚无可检查的后台任务页面，请先开始一次搜索");
+    }
+    worker.host.show();
+    return { status: "opened", url: worker.host.contents.getURL() };
   }
   async function dispose(accountId) {
     const current = states.get(accountId);
-    if (!current) return;
-    stop(accountId);
-    await current.job?.catch(() => {});
-    if (states.get(accountId) === current) states.delete(accountId);
+    const backgroundRun = current?.run;
+    const backgroundJob = current?.job;
+    const foreground = foregroundRuns.get(accountId);
+    const foregroundJob = foregroundJobs.get(accountId);
+    const worker = workers.get(accountId);
+    if (current) stop(accountId);
+    foreground?.cancel();
+    await Promise.all([backgroundJob?.catch(() => {}), foregroundJob?.catch(() => {})]);
+    if (current && states.get(accountId) === current && (!current.run || current.run === backgroundRun)) states.delete(accountId);
+    if (foregroundRuns.get(accountId) === foreground) foregroundRuns.delete(accountId);
+    if (foregroundJobs.get(accountId) === foregroundJob) foregroundJobs.delete(accountId);
+    if (worker && workers.get(accountId) === worker) {
+      workers.delete(accountId);
+      worker.host.close();
+    }
   }
-  return { search, stop, getState: snapshot, openConversation, dispose, waitForIdle: (accountId) => states.get(accountId)?.job || Promise.resolve() };
+  return {
+    search, stop, getState: snapshot, openProfile, openConversation, openTaskPage, dispose,
+    waitForIdle: (accountId) => states.get(accountId)?.job || Promise.resolve(),
+  };
 }
 
 module.exports = { createCreatorDiscovery };

@@ -86,7 +86,9 @@ async function main() {
   await expectInvoke(() => exposedApi.creators.search("account-a", query), "creators:search", { accountId: "account-a", query });
   await expectInvoke(() => exposedApi.creators.stop("account-b"), "creators:stop", { accountId: "account-b" });
   await expectInvoke(() => exposedApi.creators.getState("account-b"), "creators:state", { accountId: "account-b" });
+  await expectInvoke(() => exposedApi.creators.openProfile("account-a", creator), "creators:open-profile", { accountId: "account-a", creator });
   await expectInvoke(() => exposedApi.creators.openConversation("account-a", creator), "creators:open-conversation", { accountId: "account-a", creator });
+  await expectInvoke(() => exposedApi.creators.openTaskPage("account-b"), "creators:open-task-page", { accountId: "account-b" });
   let creatorProgress;
   const unsubscribeCreators = exposedApi.creators.onProgress((state) => { creatorProgress = state; });
   listeners.get("creators:progress")({}, { accountId: "account-b", phase: "searching" });

@@ -64,7 +64,9 @@ const creators = Object.freeze({
   search: (accountId, query) => ipcRenderer.invoke("creators:search", { accountId, query }),
   stop: (accountId) => ipcRenderer.invoke("creators:stop", { accountId }),
   getState: (accountId) => ipcRenderer.invoke("creators:state", { accountId }),
+  openProfile: (accountId, creator) => ipcRenderer.invoke("creators:open-profile", { accountId, creator }),
   openConversation: (accountId, creator) => ipcRenderer.invoke("creators:open-conversation", { accountId, creator }),
+  openTaskPage: (accountId) => ipcRenderer.invoke("creators:open-task-page", { accountId }),
   onProgress: (callback) => subscribe("creators:progress", callback),
 });
 

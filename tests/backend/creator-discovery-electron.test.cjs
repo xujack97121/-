@@ -4,6 +4,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { app, BrowserWindow, session } = require("electron");
 const { createCreatorDiscovery } = require("../../backend/creators/creator-discovery.cjs");
+const { createCreatorWorkerFactory } = require("../../backend/creators/creator-worker.cjs");
+const { platformNavigationUrl } = require("../../backend/platform/content-platforms.cjs");
 const creatorPage = require("../../backend/creators/creator-page.cjs");
 const directMessagePage = require("../../backend/operations/direct-message-page.cjs");
 
@@ -23,6 +25,8 @@ const ORIGIN = "https://www.xiaohongshu.com";
 const API = "/api/sns/web/v1/search/notes";
 const requests = [];
 const publications = [];
+const workers = [];
+const insecureRequests = [];
 let window;
 let service;
 let context;
@@ -60,11 +64,14 @@ function profileNotes(userId, titles) {
 }
 
 async function response(request) {
-  const url = new URL(request.url);
-  requests.push({ url: url.href, method: request.method });
+  // Electron's HTTPS protocol handler can retain the pre-upgrade request URL.
+  const rawUrl = new URL(request.url);
+  const url = new URL(platformNavigationUrl(rawUrl.href, "xhs") || rawUrl.href);
+  requests.push({ url: rawUrl.href, method: request.method, handler: "https" });
   if (url.origin !== ORIGIN) return new Response("", { status: 403 });
   if (url.pathname === "/fixture-submitted") { submissions += 1; return new Response("{}"); }
   if (url.pathname === "/fixture-editor-written") { editorWrites += 1; return new Response("{}"); }
+  if (url.pathname === "/api/sns/web/v1/user_posted") return new Response("{}", { status: 429, headers: { "Content-Type": "application/json" } });
   if (url.pathname === API) {
     let body = {};
     if (request.method === "POST") {
@@ -88,9 +95,11 @@ async function response(request) {
     })) } }), { headers: { "Content-Type": "application/json" } });
   }
   let html = "<h1>Fixture home</h1>";
+  if (url.pathname === "/fixture-foreground") html = '<main><input id="manual-filter" value="人工浏览保持不变"><div style="height:2400px">人工浏览内容</div></main>';
   if (url.pathname === "/search_result/") {
     const keyword = url.searchParams.get("keyword") || "";
     const slow = keyword === "slow-search";
+    if (keyword === "limited-search") return new Response("<h1>后台公开搜索访问受限</h1>", { status: 429, headers: { "Content-Type": "text/html" } });
     html = `<main><div data-search-users>
       ${slow ? "" : card(USER_A, "DOM 家居达人", null)}
       ${slow ? "" : card(USER_C, "未知粉丝达人", null)}
@@ -115,6 +124,12 @@ async function response(request) {
   if (url.pathname.startsWith("/user/profile/")) {
     const target = url.pathname.split("/").pop();
     profileNavigations.push(url.href);
+    if (scenario === "upgrade-profile" && !url.searchParams.has("upgraded")) {
+      const destination = new URL(url);
+      destination.protocol = "http:";
+      destination.searchParams.set("upgraded", "1");
+      return new Response("", { status: 302, headers: { Location: destination.href } });
+    }
     if (scenario === "slow-profile") {
       profileRequested = true;
       await new Promise((resolve) => { releaseProfile = resolve; });
@@ -139,6 +154,7 @@ async function response(request) {
         <article class="note-item" data-pinned="true"><a href="/explore/65b200000000000000000099"><span class="title">家居旧置顶不算样本</span></a></article>
       </div>
       <script>
+        ${scenario === "api-limited-profile" ? `fetch('/api/sns/web/v1/user_posted?user_id=${target}');` : ""}
         const expectedId = ${JSON.stringify(target)};
         const scenario = ${JSON.stringify(scenario)};
         document.querySelector('#open-chat').onclick = () => {
@@ -162,9 +178,15 @@ async function response(request) {
 
 async function main() {
   await app.whenReady();
+  console.log("Creator fixture: starting isolated two-channel coverage");
   const fixtureSession = session.fromPartition(`creator-fixture-${Date.now()}`);
   await fixtureSession.protocol.handle("https", response);
-  await fixtureSession.protocol.handle("http", () => new Response("", { status: 403 }));
+  await fixtureSession.protocol.handle("http", (request) => { insecureRequests.push(request.url); return new Response("", { status: 403 }); });
+  fixtureSession.webRequest.onBeforeRequest({ urls: ["http://xiaohongshu.com/*", "http://*.xiaohongshu.com/*"] }, (details, callback) => {
+    if (details.resourceType !== "mainFrame") { callback({}); return; }
+    const target = platformNavigationUrl(details.url, "xhs");
+    callback(target ? { redirectURL: target } : { cancel: true });
+  });
   window = new BrowserWindow({
     show: false, width: 1000, height: 720,
     webPreferences: { session: fixtureSession, sandbox: true, contextIsolation: true, backgroundThrottling: false },
@@ -172,11 +194,20 @@ async function main() {
   const contents = window.webContents;
   context = {
     id: "creator-fixture-account", platform: "xhs", disposed: false,
-    capture: { active: false, pendingStartRunId: "" }, operation: { active: false }, view: { webContents: contents },
+    session: fixtureSession, capture: { active: false, pendingStartRunId: "" },
+    operation: { active: false }, foregroundOperation: { active: false }, view: { webContents: contents },
   };
-  await contents.loadURL(`${ORIGIN}/`);
+  await contents.loadURL(`${ORIGIN}/fixture-foreground`);
+  await contents.executeJavaScript("scrollTo(0, 620); document.querySelector('#manual-filter').focus()");
+  const foregroundBefore = await contents.executeJavaScript("({url:location.href,scrollY,value:document.querySelector('#manual-filter').value,active:document.activeElement.id})");
+  const factory = createCreatorWorkerFactory({ BrowserWindow });
   service = createCreatorDiscovery({
     requireContext: (id) => { assert.equal(id, context.id); return context; },
+    createSearchWorker: (accountContext) => {
+      const worker = factory(accountContext);
+      workers.push(worker);
+      return worker;
+    },
     publishAccount: () => {},
     onProgress: (snapshot) => publications.push(snapshot),
     pollIntervalMs: 25, scrollIntervalMs: 100, initialWaitMs: 800,
@@ -187,11 +218,24 @@ async function main() {
   const account = context.id;
   await service.search(account, { keyword: "家居", minFollowers: 1000, maxFollowers: 50000, limit: 30 });
   assert.equal(context.operation.kind, "creator-search");
-  await assert.rejects(service.openConversation(account, { userId: USER_A, profileUrl: `${ORIGIN}/user/profile/${USER_A}` }), /先停止/);
+  const worker = workers[0];
+  assert.notEqual(worker.contents, contents);
+  assert.equal(worker.contents.session, fixtureSession);
+  assert.equal(BrowserWindow.fromWebContents(worker.contents).isVisible(), false, "Background tasks never automatically show their window");
+  await waitFor(() => service.getState(account).creators.length > 0 && service.getState(account).active);
+  assert.deepEqual(await contents.executeJavaScript("({url:location.href,scrollY,value:document.querySelector('#manual-filter').value,active:document.activeElement.id})"), foregroundBefore, "Worker search preserves foreground URL, scroll, input and focus");
+  const firstCard = service.getState(account).creators[0];
+  const activeRunId = service.getState(account).runId;
+  const parallel = await service.openConversation(account, firstCard);
+  assert.equal(parallel.status, "opened", "A verified card opens chat while background work continues");
+  assert.equal(service.getState(account).active, true);
+  assert.equal(service.getState(account).runId, activeRunId);
+  assert.equal(context.foregroundOperation.active, false);
+  const chatUrl = contents.getURL();
   await service.waitForIdle(account);
   let state = service.getState(account);
   if (state.phase !== "completed") console.error("Creator fixture diagnostics", {
-    url: contents.getURL(), loading: contents.isLoading(), requests, state,
+    url: worker.contents.getURL(), loading: worker.contents.isLoading(), requests, state,
   });
   assert.equal(state.phase, "completed", state.message);
   assert.equal(context.operation.active, false);
@@ -203,6 +247,8 @@ async function main() {
   assert.equal(state.candidates, 8);
   assert.equal(state.checked, 8);
   assert.equal(state.stage, "done");
+  assert.equal(contents.getURL(), chatUrl, "Remaining background profile visits do not navigate the foreground chat");
+  assert.ok(publications.some((snapshot) => snapshot.active && snapshot.creators.length > 0), "Verified cards stream before the search completes");
   assert.ok(state.creators.every((creator) => creator.relevance.version === 2 && creator.relevance.status === "matched" && creator.relevance.matchedNotes >= 2));
   assert.ok(publications.some((snapshot) => snapshot.stage === "collecting" && snapshot.candidates > 0 && snapshot.creators.length === 0), "Candidate search hits do not enter result cards");
   assert.ok(publications.some((snapshot) => snapshot.stage === "checking"), "Profile verification stage is reported");
@@ -211,8 +257,9 @@ async function main() {
   const creator = state.creators.find((creator) => creator.userId === USER_A);
   assert.ok(new URL(creator.profileUrl).searchParams.get("xsec_token"), "Public user navigation token retained");
   assert.ok(publications.every((snapshot) => snapshot.accountId === account));
-  assert.equal(contents.debugger.listenerCount("message"), 0, "Task listeners removed after completion");
+  assert.equal(worker.contents.debugger.listenerCount("message"), 0, "Worker task listeners removed after completion");
   assert.equal(service.getState("another-account").creators.length, 0, "Public findings remain account-scoped");
+  console.log("Creator fixture: streamed results and parallel chat passed");
 
   for (const kind of ["capture", "pending", "operation"]) {
     if (kind === "capture") context.capture.active = true;
@@ -233,7 +280,9 @@ async function main() {
   assert.equal(editor.value, "");
   assert.equal(editor.focused, false, "Opening does not fill or focus the message editor");
   assert.equal(editorWrites, 0);
+  console.log("Creator fixture: manual peer validation passed");
   assert.equal(submissions, 0);
+  const foregroundChatBeforeStop = contents.getURL();
 
   scenario = "wrong-peer";
   await assert.rejects(service.openConversation(account, creator), /未能确认/);
@@ -258,7 +307,9 @@ async function main() {
   releaseSlow?.();
   await pause(150);
   assert.equal(service.getState(account).creators.length, 0, "Late response after stop cannot leak into results");
-  assert.equal(contents.debugger.listenerCount("message"), 0);
+  assert.equal(worker.contents.debugger.listenerCount("message"), 0);
+  assert.equal(contents.getURL(), foregroundChatBeforeStop, "Stopping a worker search does not stop or replace the foreground page");
+  console.log("Creator fixture: worker-only cancellation passed");
   scenario = "slow-profile";
   await service.search(account, { keyword: "家居", minFollowers: 1000 });
   await waitFor(() => profileRequested);
@@ -275,6 +326,16 @@ async function main() {
   await service.waitForIdle(account);
   assert.equal(service.getState(account).phase, "paused", "Platform verification pauses public profile checking conservatively");
   assert.equal(context.operation.active, false);
+  const taskUrl = worker.contents.getURL();
+  console.log("Creator fixture: profile cancellation and DOM verification pause passed");
+  assert.equal((await service.openTaskPage(account)).status, "opened");
+  const taskWindow = BrowserWindow.fromWebContents(worker.contents);
+  assert.equal(taskWindow.isVisible(), true);
+  taskWindow.close();
+  assert.equal(taskWindow.isVisible(), false);
+  assert.equal(taskWindow.isDestroyed(), false);
+  assert.equal(worker.contents.getURL(), taskUrl, "Closing the task inspection window preserves the original verification page");
+  console.log("Creator fixture: task inspection hide passed");
   scenario = "http-limited-profile";
   const beforeLimitedProfiles = profileNavigations.length;
   await service.search(account, { keyword: "家居" });
@@ -282,12 +343,53 @@ async function main() {
   assert.equal(service.getState(account).phase, "paused", "HTTP429 without a known DOM notice must stop verification");
   assert.equal(profileNavigations.length - beforeLimitedProfiles, 1, "Do not continue checking profiles after a platform restriction");
   assert.equal(context.operation.active, false);
-  assert.ok(requests.every((request) => request.url.startsWith(ORIGIN)), "All test requests intercepted; no real accounts, platform requests or external URLs");
+  assert.equal(worker.contents.isDestroyed(), true, "A new explicit search replaces a previously inspected worker");
+  const replacementWorker = workers.at(-1);
+  console.log("Creator fixture: inspected worker replacement and document limit passed");
+  scenario = "api-limited-profile";
+  const beforeLimitedApi = profileNavigations.length;
+  await service.search(account, { keyword: "家居" });
+  await service.waitForIdle(account);
+  assert.equal(service.getState(account).phase, "paused", "A profile API HTTP429 pauses checking even if its document is HTTP200");
+  assert.equal(profileNavigations.length - beforeLimitedApi, 1);
+  console.log("Creator fixture: profile API limit passed");
+  scenario = "normal";
+  await service.search(account, { keyword: "limited-search" });
+  await service.waitForIdle(account);
+  assert.equal(service.getState(account).phase, "paused", "Search-level HTTP429 without API or DOM hints pauses the worker");
+  console.log("Creator fixture: search document limit passed");
+  scenario = "upgrade-profile";
+  await service.search(account, { keyword: "家居", limit: 1 });
+  await service.waitForIdle(account);
+  assert.equal(service.getState(account).phase, "completed", service.getState(account).message);
+  assert.equal(service.getState(account).creators.length, 1);
+  assert.equal(service.getState(account).creators[0].userId, USER_A, "The first matching profile survives its HTTP redirect through the shared HTTPS upgrader");
+  assert.equal(new URL(replacementWorker.contents.getURL()).pathname, `/user/profile/${USER_A}`);
+  assert.equal(new URL(replacementWorker.contents.getURL()).protocol, "https:");
+  assert.equal(insecureRequests.length, 0, "Shared hardened session upgrades same-platform HTTP redirects before any plaintext request");
+  scenario = "normal";
+  slowRequested = false;
+  await service.search(account, { keyword: "slow-search" });
+  await waitFor(() => slowRequested);
+  console.log("Creator fixture: beginning worker termination regression");
+  BrowserWindow.fromWebContents(replacementWorker.contents).destroy();
+  await service.waitForIdle(account);
+  assert.equal(service.getState(account).phase, "paused", "Worker termination pauses only the background task");
+  assert.equal(context.operation.active, false);
+  assert.equal(contents.getURL(), foregroundChatBeforeStop);
+  releaseSlow?.();
+  await service.search(account, { keyword: "家居", limit: 1 });
+  await service.waitForIdle(account);
+  assert.equal(service.getState(account).phase, "completed", service.getState(account).message);
+  assert.equal(workers.length, 3, "A terminated worker is replaced rather than reused");
+  assert.equal(replacementWorker.contents.isDestroyed(), true);
+  assert.ok(requests.every((request) => request.handler === "https" && new URL(platformNavigationUrl(request.url, "xhs")).origin === ORIGIN), "All requests reach the local HTTPS fixture; no real accounts or external platform requests");
   assert.equal(submissions, 0);
   assert.equal(editorWrites, 0);
   context.disposed = true;
   await service.dispose(account);
-  console.log("PASS: isolated Electron comprehensive-note candidate authors, verified public profile/bio/tags/original content, household-domain relevance, range/unknown filtering, favorites/recommendation/wrong-profile exclusion, slow search/profile cancellation, account isolation, manual peer-verified chat, zero editor writes/sends or private account access");
+  assert.ok(workers.every((host) => host.isDestroyed()), "Account disposal closes all workers without clearing its shared session");
+  console.log("PASS: isolated Electron independent same-session worker, streamed verified creators, parallel foreground chat and browsing state preservation, worker-only stop, task-window hide, worker termination/replacement, HTTPS redirect upgrade, scoped public evidence, range/unknown filtering, cancellation and zero message writes/sends");
 }
 
 main().catch((error) => {

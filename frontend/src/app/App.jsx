@@ -968,7 +968,7 @@ function AccountDialog({ dialog, busy, onCancel, onSubmit }) {
   );
 }
 
-function BrowserPane({ account, keyword, currentUrl, live, muted, extensionMode, desktopMode, onHome, onReload, onMuted }) {
+function BrowserPane({ account, keyword, currentUrl, live, muted, extensionMode, desktopMode, navigationBusy = false, onHome, onReload, onMuted }) {
   const site = platformLabel(account);
   const browserMode = desktopMode ? "桌面浏览器" : extensionMode ? "当前浏览器" : "不可采集";
   const accountLabel = account?.name || (extensionMode ? "当前浏览器" : "预览账号");
@@ -977,10 +977,10 @@ function BrowserPane({ account, keyword, currentUrl, live, muted, extensionMode,
       <div className="browser-toolbar">
         <span className="browser-label" title={`${accountLabel} · ${browserMode}`}><StatusDot active={live || account?.loginPhase === "logged-in"} phase={live ? "running" : account?.loginPhase} /><span>{desktopMode ? site : "网页预览"}</span><em>{!desktopMode && !extensionMode ? "演示" : ""}</em></span>
         <div className="browser-actions">
-          <button type="button" className="icon-button" onClick={onHome} title={`返回${site}首页`} aria-label={`返回${site}首页`}><IconHome size={16} stroke={1.8} /></button>
+          <button type="button" className="icon-button" onClick={onHome} disabled={navigationBusy} title={`返回${site}首页`} aria-label={`返回${site}首页`}><IconHome size={16} stroke={1.8} /></button>
           <label className="mute-check"><input type="checkbox" checked={muted} onChange={(event) => onMuted(event.target.checked)} /><IconVolume size={15} stroke={1.8} /> 静音</label>
           <div className="address-field" title={currentUrl}>{currentUrl}</div>
-          <button type="button" className="icon-button" onClick={onReload} title="刷新嵌入页面" aria-label="刷新嵌入页面"><IconRefresh size={16} stroke={1.8} /></button>
+          <button type="button" className="icon-button" onClick={onReload} disabled={navigationBusy} title="刷新嵌入页面" aria-label="刷新嵌入页面"><IconRefresh size={16} stroke={1.8} /></button>
         </div>
       </div>
       <div className={`browser-preview ${desktopMode ? "desktop-live" : ""}`}>
@@ -1467,7 +1467,9 @@ export function App() {
   const updates = useAppUpdates();
   const [runtimeStatuses, setRuntimeStatuses] = useState({});
   const [commentStartingByAccount, setCommentStartingByAccount] = useState({});
+  const [creatorOpeningByAccount, setCreatorOpeningByAccount] = useState({});
   const commentStartLocks = useRef(new Set());
+  const creatorForegroundLocks = useRef(new Set());
   const toastTimerRef = useRef(null);
   const accountsRef = useRef(accounts);
   const activeAccountRef = useRef(activeAccountId);
@@ -1544,6 +1546,11 @@ export function App() {
     ? activeAccount.capture.noteId || commentTasks.find((task) => task.runId === activeAccount.capture.runId)?.id || ""
     : "";
   const operationTasks = workspace.operationTasks;
+  const creatorAccountBusy = Boolean(activeAccount?.capture?.active || workspace.operation?.running
+    || activeAccount?.operationActive && activeAccount.operationKind !== "creator-search");
+  const creatorNavigationBusy = Boolean(creatorAccountBusy || activeAccount?.foregroundOperationActive || creatorOpeningByAccount[activeAccountId]);
+  const browserNavigationBusy = Boolean(activeAccount?.foregroundOperationActive || creatorOpeningByAccount[activeAccountId]
+    || activeAccount?.operationActive && activeAccount.operationKind !== "creator-search");
 
   const setWorkspaceSection = (section, value, accountId = activeAccountId) => updateWorkspace(accountId, (current) => {
     const previous = current[section] ?? {};
@@ -1576,7 +1583,7 @@ export function App() {
           ...current.ui,
           currentUrl: account.url || current.ui.currentUrl,
           live: typeof account.capture?.active === "boolean" || typeof account.operationActive === "boolean"
-            ? Boolean(account.capture?.active || account.operationActive)
+            ? Boolean(account.capture?.active || account.operationActive && account.operationKind !== "creator-search")
             : current.ui.live,
         },
       }));
@@ -1736,11 +1743,18 @@ export function App() {
   };
 
   const goHome = async () => {
-    if (data.desktopMode) await callDesktop("home", activeAccountId);
-    else setCurrentUrl(platformHome(platform));
+    if (browserNavigationBusy) return;
+    const owner = activeAccountId;
+    try {
+      if (data.desktopMode) await callDesktop("home", owner);
+      else setCurrentUrl(platformHome(platform));
+    } catch (error) { notifyForAccount(owner, `打开首页失败：${error.message}`, "error"); }
   };
   const reloadBrowser = async () => {
-    if (data.desktopMode) await callDesktop("reload", activeAccountId);
+    if (browserNavigationBusy) return;
+    const owner = activeAccountId;
+    try { if (data.desktopMode) await callDesktop("reload", owner); }
+    catch (error) { notifyForAccount(owner, `刷新页面失败：${error.message}`, "error"); }
   };
   const setMuted = async (nextMuted) => {
     setUi({ muted: nextMuted });
@@ -1767,13 +1781,37 @@ export function App() {
       panelNotify(`打开笔记失败：${error.message}`, "error");
     }
   };
-  const openCreatorConversation = async (accountId, creator) => {
+  const openCreatorPage = async (accountId, creator, kind) => {
     const api = desktop?.creators;
-    if (!data.desktopMode || typeof api?.openConversation !== "function") throw new Error("请使用支持找达人的桌面版本");
-    const result = await api.openConversation(accountId, creator);
-    if (result?.status !== "opened") throw new Error(result?.message || result?.reason || "尚未确认目标达人的私信会话");
-    setWorkspaceSection("ui", { currentUrl: result.url || result.profileUrl || creator.profileUrl, live: false }, accountId);
-    notifyForAccount(accountId, `已打开与“${creator.nickname}”的私信会话。`, "success");
+    const method = kind === "profile" ? "openProfile" : "openConversation";
+    if (!data.desktopMode || typeof api?.[method] !== "function") throw new Error("请使用支持找达人的桌面版本");
+    if (!accountsRef.current.some((account) => account.id === accountId)) throw new Error("目标账号已移除");
+    if (creatorForegroundLocks.current.has(accountId)) throw new Error("当前账号正在打开达人页面，请稍候");
+    creatorForegroundLocks.current.add(accountId);
+    setCreatorOpeningByAccount((previous) => ({ ...previous, [accountId]: kind }));
+    try {
+      const result = await api[method](accountId, creator);
+      if (result?.status !== "opened") throw new Error(result?.message || result?.reason || (kind === "profile" ? "尚未确认目标达人的主页" : "尚未确认目标达人的私信会话"));
+      if (accountsRef.current.some((account) => account.id === accountId)) {
+        setWorkspaceSection("ui", { currentUrl: result.url || result.profileUrl || creator.profileUrl }, accountId);
+        notifyForAccount(accountId, kind === "profile" ? `已打开“${creator.nickname}”的主页。` : `已打开与“${creator.nickname}”的私信会话。`, "success");
+      }
+      return result;
+    } finally {
+      creatorForegroundLocks.current.delete(accountId);
+      setCreatorOpeningByAccount((previous) => {
+        const next = { ...previous };
+        delete next[accountId];
+        return next;
+      });
+    }
+  };
+  const openCreatorProfile = (accountId, creator) => openCreatorPage(accountId, creator, "profile");
+  const openCreatorConversation = (accountId, creator) => openCreatorPage(accountId, creator, "conversation");
+  const openCreatorTaskPage = async (accountId) => {
+    if (!data.desktopMode || typeof desktop?.creators?.openTaskPage !== "function") throw new Error("请使用支持后台找达人的桌面版本");
+    const result = await desktop.creators.openTaskPage(accountId);
+    if (result?.status !== "opened") throw new Error(result?.message || result?.reason || "尚未打开任务页面");
     return result;
   };
   const openAnalyticsNote = async (accountId, note) => {
@@ -1909,7 +1947,7 @@ export function App() {
       </header>
       <nav className="tabs" aria-label="采集模块">{visibleTabs.map(({ icon: Icon, ...tab }) => <button key={tab.id} type="button" className={activeTab === tab.id ? "active" : ""} aria-current={activeTab === tab.id ? "page" : undefined} disabled={tab.disabled || !activeAccountId} onClick={() => openWorkbenchTab(tab.id)}><Icon size={17} stroke={1.8} aria-hidden="true" />{tab.label}</button>)}</nav>
       <div className="workspace">
-        {!analysisOpen && <BrowserPane account={activeAccount} keyword={keyword} currentUrl={currentUrl} live={live} muted={muted} extensionMode={data.extensionMode} desktopMode={data.desktopMode} onHome={goHome} onReload={reloadBrowser} onMuted={setMuted} />}
+        {!analysisOpen && <BrowserPane account={activeAccount} keyword={keyword} currentUrl={currentUrl} live={live} muted={muted} extensionMode={data.extensionMode} desktopMode={data.desktopMode} navigationBusy={browserNavigationBusy} onHome={goHome} onReload={reloadBrowser} onMuted={setMuted} />}
         <section className="workbench">
           {analysisMounted && (
             <div className="analysis-route" hidden={!analysisOpen}>
@@ -1933,7 +1971,7 @@ export function App() {
               <div className="panel-route" hidden={activeTab !== "safe"}><AutomationPanel accountId={activeAccountId} data={data} state={workspace.operation} setState={(value) => setWorkspaceSection("operation", value)} dmConfig={workspace.directMessages} setDmConfig={(value) => setWorkspaceSection("directMessages", value)} accountBusy={Boolean(activeAccount?.operationActive)} captureBusy={Boolean(activeAccount?.capture?.active && activeAccount?.operationKind !== "direct-message")} tasks={operationTasks} setTasks={setOperationTasks} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} /></div>
               <div className="panel-route" hidden={activeTab !== "search"}><SearchPanel accountId={activeAccountId} accountName={accountName} capture={activeAccount?.capture} data={data} state={workspace.search} setState={(value) => setWorkspaceSection("search", value)} keyword={keyword} setKeyword={setKeyword} setCurrentUrl={setCurrentUrl} live={live} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
               <div className="panel-route" hidden={activeTab !== "author"}><AuthorPanel accountId={activeAccountId} accountName={accountName} data={data} state={workspace.author} setState={(value) => setWorkspaceSection("author", value)} setCurrentUrl={setCurrentUrl} setLive={setLive} notify={panelNotify} openNote={openNote} onQueueComments={queueComments} onQueueOperations={queueOperations} onCollectComments={collectNoteComments} commentStarting={commentStarting} activeCommentNoteId={activeCommentNoteId} commentCollectionIndex={commentCollectionIndex} onViewComments={viewCollectedComments} /></div>
-              <div className="panel-route" hidden={activeTab !== "creators"}><CreatorDiscoveryPanel key={activeAccountId} accountId={activeAccountId} desktopMode={data.desktopMode} state={workspace.creators} setState={(value) => setWorkspaceSection("creators", value)} busy={Boolean(activeAccount?.capture?.active || workspace.operation?.running || activeAccount?.operationActive && activeAccount.operationKind !== "creator-search")} notify={panelNotify} onOpenConversation={openCreatorConversation} /></div>
+              <div className="panel-route" hidden={activeTab !== "creators"}><CreatorDiscoveryPanel key={activeAccountId} accountId={activeAccountId} desktopMode={data.desktopMode} state={workspace.creators} setState={(value) => setWorkspaceSection("creators", value)} busy={creatorNavigationBusy} navigationBusy={creatorNavigationBusy} notify={panelNotify} onOpenProfile={openCreatorProfile} onOpenConversation={openCreatorConversation} onOpenTaskPage={openCreatorTaskPage} /></div>
               </>}
               <div className="panel-route" hidden={activeTab !== "comments"}><CommentsPanel key={activeAccountId} accountId={activeAccountId} accountName={accountName} data={data} state={workspace.commentsPanel} setState={(value) => setWorkspaceSection("commentsPanel", value)} tasks={commentTasks} onStart={collectNoteComments} onStop={stopCommentCollection} onOpen={openCommentNote} activeNoteId={activeCommentNoteId} starting={commentStarting} notify={panelNotify} downloadCsv={downloadCsv} active={activeTab === "comments"} settingsRevision={settingsRevision} runtimeStatus={runtimeStatuses[activeAccountId]} onConfigure={() => setSettingsTab("ai")} /></div>
             </>

@@ -10,7 +10,7 @@ const handlers = new Map();
 const calls = [];
 let rendererUrl = "file:///creator-fixture/index.html";
 const renderer = { getURL: () => rendererUrl };
-const creators = Object.fromEntries(["search", "stop", "getState", "openConversation"].map((method) => [
+const creators = Object.fromEntries(["search", "stop", "getState", "openProfile", "openConversation", "openTaskPage"].map((method) => [
   method, (...args) => {
     calls.push({ method, args });
     return { accountId: args[0], method };
@@ -43,7 +43,9 @@ for (const [channel, method, payload, expectedArgs] of [
   ["search", "search", { accountId: "ACCOUNT-A", query }, ["account-a", query]],
   ["stop", "stop", { accountId: "account-b" }, ["account-b"]],
   ["state", "getState", { accountId: "account-b" }, ["account-b"]],
+  ["open-profile", "openProfile", { accountId: "account-a", creator }, ["account-a", creator]],
   ["open-conversation", "openConversation", { accountId: "account-a", creator }, ["account-a", creator]],
+  ["open-task-page", "openTaskPage", { accountId: "account-b" }, ["account-b"]],
 ]) {
   const handle = handlers.get(`creators:${channel}`);
   assert.equal(typeof handle, "function");

@@ -20,7 +20,7 @@ function createDirectMessageHost({ requireContext, findContext, startTask, stopA
     },
     lock(accountId) {
       const context = checkedContext(accountId);
-      if (context.capture.active || context.capture.pendingStartRunId || context.operation.active) throw new Error("该账号正在采集或执行自动化，请先停止当前任务");
+      if (context.capture.active || context.capture.pendingStartRunId || context.operation.active || context.foregroundOperation?.active) throw new Error("该账号正在采集或执行自动化，请先停止当前任务");
       context.operation = { active: true, kind: "direct-message", runId: randomUUID(), startedAt: Date.now() };
       context.view.webContents.setBackgroundThrottling(false);
       publishAccount(context);

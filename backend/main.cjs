@@ -23,6 +23,7 @@ const { DirectMessageService, MessageLedger, extractMainComments } = require("./
 const { createDirectMessageHost } = require("./operations/direct-message-host.cjs");
 const dmPage = require("./operations/direct-message-page.cjs");
 const { createCreatorDiscovery } = require("./creators/creator-discovery.cjs");
+const { createCreatorWorkerFactory } = require("./creators/creator-worker.cjs");
 
 const PROJECT_ROOT = path.join(__dirname, "..");
 const HOME_URL = "https://www.xiaohongshu.com/";
@@ -308,6 +309,7 @@ async function operateOnLoadedNote(context, actions) {
 
 async function operateNote(context, task) {
   if (context.platform === "douyin") throw new Error("抖音账号目前仅支持公开视频评论采集，不支持自动化操作");
+  if (context.foregroundOperation?.active) throw new Error("正在打开达人主页或私信，请稍后再操作");
   if (context.operation.active) throw new Error("该账号已有笔记操作正在进行");
   if (context.capture.active) throw new Error("该账号正在采集，请先停止采集");
   const requestedActions = task?.actions || {};
@@ -369,6 +371,8 @@ function publicAccount(context) {
     },
     operationActive: context.operation.active,
     operationKind: context.operation.kind || "",
+    foregroundOperationActive: Boolean(context.foregroundOperation?.active),
+    foregroundOperationKind: context.foregroundOperation?.kind || "",
     crashed: context.crashed,
   };
 }
@@ -388,6 +392,8 @@ function listPublicAccounts() {
       profileUrl: "",
       capture: { active: false, runId: "", kind: "notes", collected: 0, target: 100 },
       operationActive: false,
+      foregroundOperationActive: false,
+      foregroundOperationKind: "",
       crashed: false,
     };
   });
@@ -402,13 +408,14 @@ function publishAccountStatus(context) {
 }
 
 function sendStatus(context, phase, message, extra = {}) {
+  const foregroundAutomation = context.operation.active && context.operation.kind !== "creator-search";
   sendToRenderer("collector:status", {
     accountId: context.id,
     platform: context.platform,
     phase,
     message,
-    active: context.capture.active || context.operation.active,
-    runId: context.capture.runId || context.operation.runId || "",
+    active: context.capture.active || foregroundAutomation,
+    runId: context.capture.runId || (foregroundAutomation ? context.operation.runId : "") || "",
     kind: context.capture.kind,
     noteId: context.capture.noteId,
     ...extra,
@@ -433,7 +440,7 @@ function stopAutoScroll(context, reason = "已停止", phase = "stopped") {
   state.runId = "";
   state.pendingStartRunId = "";
   if (phase === "error") state.error = reason;
-  if (!context.operation.active && !context.disposed && !context.view.webContents.isDestroyed()) {
+  if (!context.operation.active && !context.foregroundOperation?.active && !context.disposed && !context.view.webContents.isDestroyed()) {
     context.view.webContents.setBackgroundThrottling(true);
   }
   if (wasActive) sendStatus(context, phase, reason, { collected, target, runId: stoppedRunId });
@@ -524,6 +531,7 @@ function startAutoScroll(context, runId) {
 }
 
 async function startTask(context, task, internal = {}) {
+  if (context.foregroundOperation?.active) throw new Error("正在打开达人主页或私信，请稍后再采集");
   if (context.operation.active && !(internal.directMessage && context.operation.kind === "direct-message")) throw new Error("该账号正在执行笔记操作，请稍后再采集");
   const kind = ["notes", "author", "comments"].includes(task?.kind) ? task.kind : "notes";
   const target = normalizeCaptureTarget(task?.target, kind === "comments" ? 500 : 100);
@@ -943,6 +951,7 @@ function createAccountContext(metadata, initialUrl = platformHome(metadata.platf
     view,
     capture: makeCaptureState(),
     operation: { active: false, runId: "", startedAt: 0 },
+    foregroundOperation: { active: false, kind: "", runId: "", startedAt: 0 },
     pendingResponses: new Map(),
     requestRuns: new Map(),
     navigation: { url: platformNavigationUrl(initialUrl, platform) || platformHome(platform), loading: true, title: "" },
@@ -1087,7 +1096,7 @@ function requireAiService() {
 }
 
 function assertIdleForUpdate() {
-  if (aiService?.jobs.size || [...accountContexts.values()].some((context) => context.capture.active || context.capture.pendingStartRunId || context.operation.active)) {
+  if (aiService?.jobs.size || [...accountContexts.values()].some((context) => context.capture.active || context.capture.pendingStartRunId || context.operation.active || context.foregroundOperation?.active)) {
     throw new Error("请先停止采集、自动化任务和 AI 分析，再安装更新。");
   }
 }
@@ -1125,7 +1134,7 @@ async function createWindow() {
   if (!creators) {
     creators = createCreatorDiscovery({
       requireContext,
-      ensureNetworkCapture: attachNetworkCapture,
+      createSearchWorker: createCreatorWorkerFactory({ BrowserWindow }),
       publishAccount: (context) => { publishAccountStatus(context); publishAccountsChanged(); },
       onProgress: (state) => sendToRenderer("creators:progress", state),
     });
@@ -1300,24 +1309,46 @@ for (const [channel, action] of [
   });
 }
 
+function assertForegroundNavigationAllowed(context) {
+  if (context.foregroundOperation?.active) throw new Error("正在打开达人主页或私信，请稍后再操作");
+  if (context.operation.active && context.operation.kind !== "creator-search") throw new Error("该账号正在执行笔记操作");
+}
+
+async function withForegroundNavigation(context, action) {
+  assertForegroundNavigationAllowed(context);
+  const operation = { active: true, kind: "browser-navigation", runId: randomUUID(), startedAt: Date.now() };
+  context.foregroundOperation = operation;
+  try {
+    publishAccountStatus(context);
+    return await action();
+  } finally {
+    if (context.foregroundOperation === operation) {
+      context.foregroundOperation = { active: false, kind: "", runId: "", startedAt: 0 };
+      if (!context.disposed) publishAccountStatus(context);
+    }
+  }
+}
+
 ipcMain.handle("browser:navigate", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
   const url = platformNavigationUrl(payload?.url, context.platform);
   if (!url) throw new Error("链接平台与当前账号不匹配，或链接包含不安全的协议、端口或凭据");
-  if (context.operation.active) throw new Error("该账号正在执行笔记操作");
-  stopAutoScroll(context);
-  await context.view.webContents.loadURL(url);
-  return { ok: true, accountId: context.id, url };
+  return withForegroundNavigation(context, async () => {
+    stopAutoScroll(context);
+    await context.view.webContents.loadURL(url);
+    return { ok: true, accountId: context.id, url };
+  });
 });
 ipcMain.handle("browser:open-note", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
-  if (context.operation.active) throw new Error("该账号正在执行笔记操作");
-  stopAutoScroll(context);
-  const url = await resolveLiveNoteUrl(context, payload?.note);
-  await context.view.webContents.loadURL(url);
-  return { ok: true, accountId: context.id, url };
+  return withForegroundNavigation(context, async () => {
+    stopAutoScroll(context);
+    const url = await resolveLiveNoteUrl(context, payload?.note);
+    await context.view.webContents.loadURL(url);
+    return { ok: true, accountId: context.id, url };
+  });
 });
 ipcMain.handle("browser:operate-note", async (event, payload) => {
   assertMainRenderer(event);
@@ -1341,7 +1372,9 @@ for (const [action, handler] of [
   ["search", (payload) => creators.search(payload.accountId, payload.query)],
   ["stop", (payload) => creators.stop(payload.accountId)],
   ["state", (payload) => creators.getState(payload.accountId)],
+  ["open-profile", (payload) => creators.openProfile(payload.accountId, payload.creator)],
   ["open-conversation", (payload) => creators.openConversation(payload.accountId, payload.creator)],
+  ["open-task-page", (payload) => creators.openTaskPage(payload.accountId)],
 ]) {
   ipcMain.handle(`creators:${action}`, (event, payload) => {
     assertMainRenderer(event);
@@ -1359,26 +1392,27 @@ ipcMain.handle("browser:stop-task", (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
   if (context.capture.purpose === "direct-message" && context.capture.active) directMessages.stop(context.id);
-  if (context.operation.kind === "creator-search") creators?.stop(context.id);
   stopAutoScroll(context, "用户已停止采集");
   return { ok: true, accountId: context.id };
 });
-ipcMain.handle("browser:reload", (event, payload) => {
+ipcMain.handle("browser:reload", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
-  if (context.operation.active) throw new Error("该账号正在执行笔记操作");
-  stopAutoScroll(context);
-  context.view.webContents.reload();
-  return { ok: true, accountId: context.id };
+  return withForegroundNavigation(context, () => {
+    stopAutoScroll(context);
+    context.view.webContents.reload();
+    return { ok: true, accountId: context.id };
+  });
 });
 ipcMain.handle("browser:home", async (event, payload) => {
   assertMainRenderer(event);
   const context = requireContext(payload?.accountId);
-  if (context.operation.active) throw new Error("该账号正在执行笔记操作");
-  stopAutoScroll(context);
-  const url = platformHome(context.platform);
-  await context.view.webContents.loadURL(url);
-  return { ok: true, accountId: context.id, url };
+  return withForegroundNavigation(context, async () => {
+    stopAutoScroll(context);
+    const url = platformHome(context.platform);
+    await context.view.webContents.loadURL(url);
+    return { ok: true, accountId: context.id, url };
+  });
 });
 ipcMain.handle("browser:set-muted", (event, payload) => {
   assertMainRenderer(event);

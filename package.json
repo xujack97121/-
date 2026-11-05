@@ -1,6 +1,6 @@
 {
   "name": "xiaohongshu-multi-account-collector",
-  "version": "2.1.9",
+  "version": "2.1.10",
   "description": "支持多账号隔离登录的小红书公开数据采集与笔记操作工作台",
   "author": "xujack",
   "private": true,
@@ -15,7 +15,7 @@
     "package:win": "npm run build && npm run desktop:check && electron-builder --win nsis --x64 --publish never",
     "package:mac": "npm run build && npm run desktop:check && electron-builder --mac dmg --arm64 --publish never",
     "check": "npm run build && npm run desktop:check && npm test && npm run test:douyin && npm run test:opinion && npm run test:updates && npm run test:direct-messages && npm run test:creators && node scripts/verify-release.cjs",
-    "test:creators": "node --check backend/creators/creator-discovery.cjs && node --check backend/creators/creator-data.cjs && node --check backend/creators/creator-page.cjs && node --check backend/creators/creator-relevance.cjs && node --test tests/backend/creator-discovery.test.cjs tests/backend/creator-relevance.test.cjs tests/backend/creator-ipc-routing.test.cjs && node tests/frontend/creator-discovery.test.mjs",
+    "test:creators": "node --check backend/creators/creator-discovery.cjs && node --check backend/creators/creator-worker.cjs && node --check backend/creators/creator-data.cjs && node --check backend/creators/creator-page.cjs && node --check backend/creators/creator-relevance.cjs && node --test tests/backend/creator-discovery.test.cjs tests/backend/creator-worker.test.cjs tests/backend/creator-relevance.test.cjs tests/backend/creator-ipc-routing.test.cjs tests/backend/creator-browser-routing.test.cjs && node tests/frontend/creator-discovery.test.mjs",
     "test:electron-creators": "electron tests/backend/creator-discovery-electron.test.cjs",
     "test:direct-messages": "node --check backend/operations/direct-message-host.cjs && node --check backend/operations/direct-message-page.cjs && node --check backend/operations/direct-message-service.cjs && node --test tests/backend/direct-message-service.test.cjs && node tests/frontend/direct-messages.test.mjs",
     "test:electron-direct-messages": "electron tests/backend/direct-message-electron.test.cjs",

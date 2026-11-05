@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconAlertCircle, IconCircleCheck, IconLoader2, IconMessageCircle, IconPlayerStop, IconSearch, IconUserCircle, IconUsers } from "@tabler/icons-react";
+import { IconAlertCircle, IconCircleCheck, IconExternalLink, IconLoader2, IconMessageCircle, IconPlayerStop, IconSearch, IconUserCircle, IconUsers } from "@tabler/icons-react";
 import { CREATOR_FOLLOWER_PRESETS, EMPTY_CREATOR_SNAPSHOT, creatorCountLabel, mergeCreatorSnapshot, normalizeCreatorState, validateCreatorSearch } from "./creator-discovery.js";
 import "./creator-discovery.css";
 
@@ -16,12 +16,13 @@ function CreatorEvidence({ relevance }) {
   </div>;
 }
 
-export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState, busy = false, notify, onOpenConversation, onActive }) {
+export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState, busy = false, navigationBusy = busy, notify, onOpenProfile, onOpenConversation, onOpenTaskPage, onActive }) {
   const api = globalThis.collectorDesktop?.creators;
   const config = normalizeCreatorState(state);
   const snapshot = config.snapshot.accountId === accountId ? config.snapshot : { ...EMPTY_CREATOR_SNAPSHOT, accountId };
   const [pending, setPending] = useState("");
   const [failure, setFailure] = useState(null);
+  const [navigationFailure, setNavigationFailure] = useState("");
   const [opening, setOpening] = useState("");
   const accountRef = useRef(accountId);
   const setterRef = useRef(setState);
@@ -29,7 +30,10 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
   const generation = useRef(0);
   const retiredRuns = useRef(new Set());
   const pendingSearch = useRef(false);
-  const actionLock = useRef(false);
+  const searchLock = useRef(false);
+  const navigationLock = useRef(false);
+  const navigationGeneration = useRef(0);
+  const mounted = useRef(false);
   const fields = useRef({});
   accountRef.current = accountId;
   setterRef.current = setState;
@@ -51,13 +55,17 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
 
   useEffect(() => {
     let disposed = false;
+    mounted.current = true;
     const requestGeneration = ++generation.current;
+    navigationGeneration.current += 1;
     retiredRuns.current.clear();
     pendingSearch.current = false;
-    actionLock.current = false;
+    searchLock.current = false;
+    navigationLock.current = false;
     setPending("");
     setOpening("");
     setFailure(null);
+    setNavigationFailure("");
     const receive = (next) => { if (!disposed && next?.accountId === accountId) accept(next); };
     const unsubscribe = api?.onProgress?.(receive);
     api?.getState?.(accountId).then((next) => {
@@ -65,11 +73,12 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
     }).catch((error) => {
       if (!disposed && requestGeneration === generation.current) setFailure({ message: error.message || "读取达人搜索状态失败" });
     });
-    return () => { disposed = true; unsubscribe?.(); };
+    return () => { disposed = true; mounted.current = false; navigationGeneration.current += 1; unsubscribe?.(); };
   }, [accountId, api, accept]);
 
   const active = snapshot.phase === "searching";
-  const locked = active || Boolean(pending) || Boolean(opening) || busy;
+  const searchLocked = active || Boolean(pending) || Boolean(opening) || busy || navigationBusy;
+  const navigationLocked = Boolean(opening) || navigationBusy;
   useEffect(() => { onActive?.(active); }, [active, onActive]);
   const errorMessage = failure?.message || (["error", "paused"].includes(snapshot.phase) ? snapshot.message : "");
   const supported = desktopMode && typeof api?.search === "function";
@@ -77,7 +86,7 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
 
   const search = async (event) => {
     event.preventDefault();
-    if (locked || actionLock.current) return;
+    if (searchLocked || searchLock.current) return;
     const validation = validateCreatorSearch(config);
     if (!validation.ok) {
       setFailure(validation);
@@ -87,19 +96,20 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
     if (!supported) { setFailure({ message: "找达人需要使用新版桌面软件" }); return; }
     const owner = accountId;
     const requestGeneration = ++generation.current;
-    actionLock.current = true;
+    searchLock.current = true;
     pendingSearch.current = true;
     if (snapshotRef.current.runId) retiredRuns.current.add(snapshotRef.current.runId);
     const initial = { ...EMPTY_CREATOR_SNAPSHOT, accountId: owner, phase: "searching", active: true, stage: "collecting", keyword: validation.query.keyword, message: "正在发现候选作者" };
     snapshotRef.current = initial;
     setState((previous) => ({ ...normalizeCreatorState(previous), keyword: validation.query.keyword, snapshot: initial }));
     setFailure(null);
+    setNavigationFailure("");
     setPending("search");
     try {
       const next = await api.search(owner, validation.query);
-      if (owner === accountRef.current && requestGeneration === generation.current) accept(next, true);
+      if (mounted.current && owner === accountRef.current && requestGeneration === generation.current) accept(next, true);
     } catch (error) {
-      if (owner === accountRef.current && requestGeneration === generation.current) {
+      if (mounted.current && owner === accountRef.current && requestGeneration === generation.current) {
         pendingSearch.current = false;
         const message = error.message || "查找失败，请重试";
         const next = { ...snapshotRef.current, phase: "error", active: false, message };
@@ -109,35 +119,50 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
         notify?.(message, "error");
       }
     } finally {
-      if (owner === accountRef.current && requestGeneration === generation.current) {
-        actionLock.current = false;
+      if (mounted.current && owner === accountRef.current && requestGeneration === generation.current) {
+        searchLock.current = false;
         setPending("");
       }
     }
   };
   const stop = async () => {
-    if (actionLock.current || typeof api?.stop !== "function") return;
+    if (searchLock.current || typeof api?.stop !== "function") return;
     const owner = accountId;
-    actionLock.current = true;
+    searchLock.current = true;
     setPending("stop");
     setFailure(null);
-    try { const next = await api.stop(owner); if (owner === accountRef.current) accept(next); }
-    catch (error) { if (owner === accountRef.current) { setFailure({ message: error.message || "停止查找失败，请重试" }); notify?.(error.message, "error"); } }
-    finally { if (owner === accountRef.current) { actionLock.current = false; setPending(""); } }
+    try { const next = await api.stop(owner); if (mounted.current && owner === accountRef.current) accept(next); }
+    catch (error) { if (mounted.current && owner === accountRef.current) { setFailure({ message: error.message || "停止查找失败，请重试" }); notify?.(error.message, "error"); } }
+    finally { if (mounted.current && owner === accountRef.current) { searchLock.current = false; setPending(""); } }
   };
-  const openConversation = async (creator) => {
-    if (locked || actionLock.current) return;
+  const openPage = async (kind, creator) => {
+    if (navigationLocked || navigationLock.current || !desktopMode) return;
     const owner = accountId;
-    actionLock.current = true;
-    setOpening(creator.userId);
-    setFailure(null);
+    const requestGeneration = navigationGeneration.current;
+    const callbacks = { profile: onOpenProfile, conversation: onOpenConversation, task: onOpenTaskPage };
+    const methods = { profile: "openProfile", conversation: "openConversation", task: "openTaskPage" };
+    const labels = { profile: "达人主页", conversation: "达人私信", task: "任务页面" };
+    navigationLock.current = true;
+    setOpening(`${kind}:${creator?.userId || ""}`);
+    setNavigationFailure("");
     try {
-      if (onOpenConversation) await onOpenConversation(owner, creator);
-      else if (typeof api?.openConversation === "function") await api.openConversation(owner, creator);
-      else throw new Error("当前桌面版本不支持打开达人私信");
+      if (callbacks[kind]) await callbacks[kind](owner, creator);
+      else if (typeof api?.[methods[kind]] === "function") {
+        const result = await api[methods[kind]](owner, creator);
+        if (result?.status !== "opened") throw new Error(result?.message || result?.reason || `尚未确认打开${labels[kind]}`);
+      } else throw new Error(`当前桌面版本不支持打开${labels[kind]}`);
     } catch (error) {
-      if (owner === accountRef.current) { setFailure({ message: error.message || "打开私信失败，请重试" }); notify?.(error.message, "error"); }
-    } finally { if (owner === accountRef.current) { actionLock.current = false; setOpening(""); } }
+      if (mounted.current && owner === accountRef.current && requestGeneration === navigationGeneration.current) {
+        const message = error.message || `打开${labels[kind]}失败，请重试`;
+        setNavigationFailure(message);
+        notify?.(message, "error");
+      }
+    } finally {
+      if (mounted.current && owner === accountRef.current && requestGeneration === navigationGeneration.current) {
+        navigationLock.current = false;
+        setOpening("");
+      }
+    }
   };
   const invalid = (field) => failure?.field === field ? { "aria-invalid": true, "aria-describedby": fieldErrorId } : {};
   const stageLabel = snapshot.stage === "checking" ? "核验公开主页与内容" : "发现候选作者";
@@ -152,12 +177,12 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
   return (
     <section className="panel-body creator-panel" aria-label="找达人">
       <form className="creator-controls" onSubmit={search} noValidate>
-        <fieldset disabled={locked}>
+        <fieldset disabled={searchLocked}>
           <legend>查找达人</legend>
           <div className="creator-query-row">
             <label className="creator-keyword">行业关键词<input aria-label="行业关键词" ref={(node) => { fields.current.keyword = node; }} value={config.keyword} maxLength={160} onChange={(event) => change({ keyword: event.target.value })} {...invalid("keyword")} /></label>
             <label>最多 <select aria-label="搜索达人数" ref={(node) => { fields.current.limit = node; }} value={config.limit} onChange={(event) => change({ limit: event.target.value })} {...invalid("limit")}>{[20, 30, 50, 100].map((limit) => <option value={limit} key={limit}>{limit} 人</option>)}</select></label>
-            {!active && <button className="button primary" type="submit" disabled={locked || !supported}><IconSearch size={16} aria-hidden="true" />查找达人</button>}
+            {!active && <button className="button primary" type="submit" disabled={searchLocked || !supported}><IconSearch size={16} aria-hidden="true" />查找达人</button>}
           </div>
           <div className="creator-filter-row">
             <label>粉丝量 <select aria-label="达人粉丝量范围" value={config.preset} onChange={(event) => change({ preset: event.target.value })}>{CREATOR_FOLLOWER_PRESETS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
@@ -173,17 +198,19 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
       <div className="creator-results-heading">
         <div className="creator-result-count"><IconUsers size={17} aria-hidden="true" /><strong>已核验匹配 {snapshot.creators.length} 位达人</strong></div>
         {active && <button className="button" type="button" disabled={Boolean(pending)} onClick={stop}><IconPlayerStop size={15} aria-hidden="true" />{pending === "stop" ? "正在停止" : "停止查找"}</button>}
+        {snapshot.phase === "paused" && desktopMode && <button className="button" type="button" disabled={navigationLocked} onClick={() => openPage("task")}><IconExternalLink size={15} aria-hidden="true" />{opening === "task:" ? "打开中" : "检查任务页面"}</button>}
         {(active || snapshot.candidates > 0 || snapshot.checked > 0) && <div className="creator-verification-progress" aria-label="达人核验进度">
           {active && <strong>{stageLabel}</strong>}<span>候选 {snapshot.candidates} 位</span><span>已核验 {snapshot.checked} 位</span><span>不符合条件 {snapshot.rejected} 位</span><span>证据不足 {snapshot.insufficient} 位</span>
         </div>}
         <div className={`creator-run-status${errorMessage ? " is-error" : ""}`} role={errorMessage && !failure?.field ? "alert" : "status"}>
           {errorMessage && !failure?.field ? <><IconAlertCircle size={15} aria-hidden="true" />{errorMessage}</>
             : !desktopMode ? "请在桌面软件中使用找达人"
-              : busy && !active ? "当前账号正在执行其他任务"
-                : snapshot.message && !["error", "paused"].includes(snapshot.phase) ? <>{active && <IconLoader2 size={15} className="creator-spinner" aria-hidden="true" />}{snapshot.message}</> : null}
+              : snapshot.message && !["error", "paused"].includes(snapshot.phase) ? <>{active && <IconLoader2 size={15} className="creator-spinner" aria-hidden="true" />}{snapshot.message}</>
+                : busy && !active ? "当前账号正在执行其他任务" : null}
         </div>
+        {navigationFailure && <p className="creator-error creator-navigation-error" role="alert" aria-label="达人页面打开失败"><IconAlertCircle size={16} aria-hidden="true" />{navigationFailure}</p>}
       </div>
-      <ul className="creator-list" aria-label="达人列表" aria-busy={active}>
+      <ul className="creator-list" aria-label="达人列表">
         {snapshot.creators.map((creator) => <li className="creator-card" key={creator.userId}>
           <div className="creator-avatar"><IconUserCircle size={36} aria-hidden="true" />{creator.avatarUrl && <img src={creator.avatarUrl} alt="" width="44" height="44" loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true; }} />}</div>
           <div className="creator-card-content">
@@ -193,7 +220,10 @@ export function CreatorDiscoveryPanel({ accountId, desktopMode, state, setState,
             <CreatorEvidence relevance={creator.relevance} />
             {(creator.likes !== null || creator.noteCount !== null) && <div className="creator-stats">{creator.likes !== null && <span>获赞 {creatorCountLabel(creator.likes)}</span>}{creator.noteCount !== null && <span>笔记 {creatorCountLabel(creator.noteCount)}</span>}</div>}
           </div>
-          <button className="button creator-message-button" type="button" aria-label={`私信达人 ${creator.nickname}`} disabled={locked || !desktopMode} onClick={() => openConversation(creator)}>{opening === creator.userId ? <IconLoader2 size={16} className="creator-spinner" aria-hidden="true" /> : <IconMessageCircle size={16} aria-hidden="true" />}{opening === creator.userId ? "打开中" : "私信"}</button>
+          <div className="creator-card-actions">
+            <button className="button creator-profile-button" type="button" aria-label={`打开达人主页 ${creator.nickname}`} disabled={navigationLocked || !desktopMode} onClick={() => openPage("profile", creator)}>{opening === `profile:${creator.userId}` ? <IconLoader2 size={16} className="creator-spinner" aria-hidden="true" /> : <IconExternalLink size={16} aria-hidden="true" />}{opening === `profile:${creator.userId}` ? "打开中" : "主页"}</button>
+            <button className="button creator-message-button" type="button" aria-label={`私信达人 ${creator.nickname}`} disabled={navigationLocked || !desktopMode} onClick={() => openPage("conversation", creator)}>{opening === `conversation:${creator.userId}` ? <IconLoader2 size={16} className="creator-spinner" aria-hidden="true" /> : <IconMessageCircle size={16} aria-hidden="true" />}{opening === `conversation:${creator.userId}` ? "打开中" : "私信"}</button>
+          </div>
         </li>)}
         {!snapshot.creators.length && <li className="creator-empty">{active ? <IconLoader2 size={28} className="creator-spinner" aria-hidden="true" /> : <IconUsers size={28} aria-hidden="true" />}<strong>{emptyLabel}</strong></li>}
       </ul>
